@@ -130,3 +130,17 @@ accepts JSON messages over a local socket and forwards them to the
 kernel's comm manager, allowing external processes (including Julia
 subprocesses or other languages) to interoperate with the JupyterLab
 applet even when they cannot attach a native `ipykernel.comm`.
+
+Security and JupyterHub
+-----------------------
+
+For security, the bridge binds only to localhost on a dynamically chosen
+local port (not a well-known or publicly routable port). The bridge is
+intended for use by local clients on the same host; it does not expose
+services to the network by default. This minimizes exposure even when
+used on multi-user JupyterHub deployments. When running under
+JupyterHub, `GeoGebra.jl` (and other local Julia processes) can still
+communicate with the injected GeoGebra applet through the bridge because
+the bridge forwards messages into the kernel's comm manager. Ensure your
+JupyterHub configuration restricts access to the notebook server's host
+and ports according to your site security policy.
