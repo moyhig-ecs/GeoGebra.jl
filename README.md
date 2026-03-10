@@ -112,3 +112,21 @@ df = @await ConstructionIO.initialize_dataframe(ggb, use_applet=true)
 Note: make sure the Python environment into which you install `ggblab`
 is the same kernel environment that runs JupyterLab (or the one your
 bridge connects to) so the bridge and injected applet are available.
+
+IJulia `Comm` and subprocess limitations
+---------------------------------------
+
+IJulia's `Comm` implementation uses `PythonCall` as a bridge to reach
+Python-level `ipykernel.comm` objects when Julia and the kernel are
+running in the same process. However, when Julia or helper code runs in
+subprocesses, those subprocesses do not share the same JupyterLab
+services and comm manager as the kernel process. This means direct
+subprocess-originated Comm connections cannot reliably reach the
+JupyterLab frontend.
+
+To work around this, `GeoGebra.jl` uses the separate `comm_bridge`
+TCP/JSON bridge (the `comm_bridge.server` implementation). The bridge
+accepts JSON messages over a local socket and forwards them to the
+kernel's comm manager, allowing external processes (including Julia
+subprocesses or other languages) to interoperate with the JupyterLab
+applet even when they cannot attach a native `ipykernel.comm`.
