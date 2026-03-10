@@ -1,0 +1,11 @@
+name = "GeoGebra"
+uuid = "a3d9c1f0-6b2e-4f6a-9c8d-2e1f0a9b8c7d"
+authors = ["Manabu Higashida <manabu@higashida.net>"]
+version = "0.1.0"
+
+[compat]
+julia = ">=1.8, <2.0"
+
+[deps]
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
