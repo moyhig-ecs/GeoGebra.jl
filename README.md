@@ -78,3 +78,37 @@ Notes
 - Ensure `Project.toml` and `src/GeoGebra.jl` are present (they are in
   this directory). After creating the GitHub repository for `GeoGebra.jl`,
   push this directory as the repository root so `Pkg.add(url=...)` works.
+
+Using ggblab from Julia via PythonCall + CondaPkg
+------------------------------------------------
+
+You can install the Python `ggblab` package into a Conda-managed
+environment from within Julia using `CondaPkg`, then access it via
+`PythonCall`. This allows most ggblab Python functionality to be used
+directly from Julia:
+
+```julia
+using CondaPkg
+# install from a local wheel (example); adjust path/version as needed
+CondaPkg.add_pip("ggblab", version="@ file://.ggblab-1.7.1-py3-none-any.whl")
+```
+
+```julia
+using PythonCall
+ggb = pyimport("ggblab")
+ggb.connect_to_bridge()
+
+@await ggb.function("getVersion")
+```
+
+You can also use `ggblab_extra` utilities from Julia:
+
+```julia
+ggbex = pyimport("ggblab_extra")
+ConstructionIO = ggbex.ConstructionIO
+df = @await ConstructionIO.initialize_dataframe(ggb, use_applet=true)
+```
+
+Note: make sure the Python environment into which you install `ggblab`
+is the same kernel environment that runs JupyterLab (or the one your
+bridge connects to) so the bridge and injected applet are available.
