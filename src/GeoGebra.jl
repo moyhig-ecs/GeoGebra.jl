@@ -148,9 +148,7 @@ function send_function_eval(name, args_tuple)
 end
 
 
-"""A lightweight Julia wrapper for objects created in the GeoGebra applet.
-Holds the assigned `label` and the decoded `data` (a Python dict as PyObject).
-"""
+# Lightweight wrapper for objects created in the GeoGebra applet.
 mutable struct GGBObject
     label::String
     data::Any
@@ -159,6 +157,82 @@ end
 # Display only the label for brevity in REPL and printing
 Base.show(io::IO, ::MIME"text/plain", g::GGBObject) = print(io, g.label)
 Base.show(io::IO, g::GGBObject) = print(io, g.data)
+
+
+"""Encode a single `element`-shaped dict using the Python-side schema
+and send it to the applet via the `evalXML` API.
+
+`elem_data` should be the dictionary representing a single element as
+produced in `GGBObject.data["element"][i]`.
+"""
+function evalXML_from_element(elem_data; host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+    try
+        xmlschema = PythonCall.pyimport("xmlschema")
+        pyggb = PythonCall.pyimport("ggblab")
+        # Encode the element into an ElementTree (or compatible object)
+        encoded = getproperty(pyggb, :schema).encode(elem_data, "element")
+        # Serialize to bytes/string using xmlschema helper
+        xml_str = xmlschema.etree_tostring(encoded)
+        return send_function("evalXML", xml_str; host=host, port=port)
+    catch e
+        throw(ErrorException("Failed to evalXML from element: $(e)"))
+    end
+end
+
+
+"""Convenience mutating helper: take a `GGBObject` whose `data` has an
+`"element"` array, reserialize the specified element index back to XML
+and send it to the applet via `evalXML`.
+
+Usage:
+```
+# modify p1.data["element"][1] as needed
+set_object!(p1)                 # sends element at index 1 (1-based)
+set_object!(p1, element_index=1) # explicit
+```
+"""
+function set_object!(g::GGBObject; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+    # Attempt to obtain the "element" collection in a way that works for
+    # both native Julia dicts/vectors and Python-callable PyObject mappings.
+    elems = nothing
+    # Try Julia-style Dict access first
+    try
+        elems = g.data["element"]
+    catch
+    end
+    # Fallback: try attribute access on PyObject
+    if elems === nothing
+        try
+            elems = getproperty(g.data, "element")
+        catch
+        end
+    end
+
+    if elems === nothing
+        throw(ErrorException("GGBObject.data does not contain an \"element\" array"))
+    end
+
+    # Attempt to index the collection. PythonCall indexes usually behave like
+    # 1-based Julia indexing, but wrap in try/catch to provide helpful errors.
+    elem = nothing
+    try
+        elem = elems[element_index]
+    catch
+        try
+            # If the Python sequence is 0-based, try element_index-1
+            elem = elems[element_index - 1]
+        catch
+            throw(BoundsError(elems, element_index))
+        end
+    end
+
+    return evalXML_from_element(elem; host=host, port=port)
+end
+
+
+"""A lightweight Julia wrapper for objects created in the GeoGebra applet.
+Holds the assigned `label` and the decoded `data` (a Python dict as PyObject).
+"""
 
 """Refresh `g.data` by re-fetching the object's XML and decoding it.
 Returns the updated `GGBObject` (modified in-place).
@@ -232,6 +306,34 @@ function refresh!(objs::AbstractVector{GGBObject})
         end
     end
     return objs
+end
+
+
+"""Send each `GGBObject` in `objs` back to the applet by reserializing
+the specified element and calling `evalXML` for each. Mirrors `refresh!`'s
+vector form and returns `objs`.
+"""
+function set_object!(objs::AbstractVector{GGBObject}; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+    for g in objs
+        try
+            set_object!(g; element_index=element_index, host=host, port=port)
+        catch
+            # ignore individual failures to match refresh! semantics
+        end
+    end
+    return objs
+end
+
+
+"""Preferred short name matching `refresh!` symmetry: `set!` is an alias
+to `set_object!` for both scalar and vector forms.
+"""
+function set!(g::GGBObject; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+    return set_object!(g; element_index=element_index, host=host, port=port)
+end
+
+function set!(objs::AbstractVector{GGBObject}; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+    return set_object!(objs; element_index=element_index, host=host, port=port)
 end
 
 # `refresh_all_objects!` removed — it did not behave as expected. Use
@@ -341,8 +443,16 @@ macro ggblab_function(inner)
     if inner isa Expr && inner.head == :call
         name = inner.args[1]
         arg_nodes = inner.args[2:end]
-        args_tuple = Expr(:tuple, arg_nodes...)
-        return esc(Expr(:call, Expr(:call, :getfield, :(GeoGebra), QuoteNode(:send_function_eval)), QuoteNode(name), args_tuple))
+        # Build a tuple of escaped argument expressions so they evaluate in
+        # the caller's scope. `send_function_eval` will normalize the tuple
+        # into an array when constructing the JSON payload.
+        esc_args = Expr[]
+        for a in arg_nodes
+            push!(esc_args, esc(a))
+        end
+        args_tuple = Expr(:tuple, esc_args...)
+        call_expr = Expr(:call, Expr(:call, :getfield, :(GeoGebra), QuoteNode(:send_function_eval)), QuoteNode(name), args_tuple)
+        return esc(call_expr)
     else
         error("@ggblab api usage must be like `@ggblab api fn(args...)`")
     end
@@ -464,6 +574,6 @@ macro await(expr)
              end)
 end
 
-export request, poll_reply, request_with_retry, set_default_host, set_default_port, send_command, send_function, send_command_eval, send_function_eval, fetch_object, refresh, refresh!, GGBObject, @ggblab, @ggb, @ggblab_command, @ggblab_function, @await
+export request, poll_reply, request_with_retry, set_default_host, set_default_port, send_command, send_function, send_command_eval, send_function_eval, fetch_object, refresh, refresh!, GGBObject, set_object!, set!, evalXML_from_element, @ggblab, @ggb, @ggblab_command, @ggblab_function, @await
 
 end # module

@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "c32fa3e0ed43a118eee48954ecfde3a8b8bcc609"
+project_hash = "39e2a6531d8b3bcf33fb494cd87411baf8444f31"
 
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
@@ -52,10 +52,10 @@ uuid = "7b1f6079-737a-58dc-b8bc-7a2ca5c1b5ee"
 version = "1.11.0"
 
 [[deps.GeoGebra]]
-deps = ["JSON"]
+deps = ["JSON", "PythonCall"]
 path = "."
-uuid = "c0ffee00-0000-4000-8000-000000000001"
-version = "0.1.0"
+uuid = "db4dc2ca-38af-41b7-ab88-76237475b77d"
+version = "0.1.1"
 
 [[deps.InteractiveUtils]]
 deps = ["Markdown"]

@@ -1,7 +1,7 @@
 name = "GeoGebra"
-uuid = "a3d9c1f0-6b2e-4f6a-9c8d-2e1f0a9b8c7d"
+uuid = "db4dc2ca-38af-41b7-ab88-76237475b77d"
 authors = ["Manabu Higashida <manabu@higashida.net>"]
-version = "0.1.0"
+version = "0.1.2"
 
 [compat]
 julia = ">=1.8, <2.0"

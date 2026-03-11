@@ -96,7 +96,7 @@ directly from Julia:
 ```julia
 using CondaPkg
 # install from a local wheel (example); adjust path/version as needed
-CondaPkg.add_pip("ggblab", version="@ file://.ggblab-1.7.1-py3-none-any.whl")
+CondaPkg.add_pip("ggblab", version="@ file://.ggblab-1.7.2-py3-none-any.whl")
 ```
 
 ```julia
