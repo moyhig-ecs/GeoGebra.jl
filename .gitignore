@@ -1,2 +1,4 @@
 **/*.xsd
 **/*.ipynb
+**/.CondaPkg
+.ggblab_command_cache*
