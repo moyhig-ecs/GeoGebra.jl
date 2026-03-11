@@ -46,6 +46,12 @@ from ggblab_core import AppletInjector
 info = AppletInjector.start_proxy_mode()
 ```
 
+Alternatively, when running JupyterLab with this extension installed you can
+start the bridge from the JupyterLab Launcher: open Launcher → Other and
+click the "GeoGebra (comm_bridge)" tile. The launcher action starts the
+bridge server and injects the GeoGebra applet into the current kernel so it
+is immediately available to Julia clients via the bridge.
+
 Once the bridge is running and the GeoGebra applet has been injected into the
 `ggblab`-managed JupyterLab kernel, you can use the Julia client as follows.
 
