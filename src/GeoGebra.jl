@@ -158,6 +158,51 @@ end
 Base.show(io::IO, ::MIME"text/plain", g::GGBObject) = print(io, g.label)
 Base.show(io::IO, g::GGBObject) = print(io, g.data)
 
+# Implicit construction history (default construction protocol storage).
+# Use a `Ref` to allow rebinding the contained vector without changing the
+# exported binding; users should use provided APIs rather than touching this.
+const _CONSTRUCTION_HISTORY = Ref{Vector{GGBObject}}(GGBObject[])
+
+"""Return the current construction history vector (live reference)."""
+function construction_history()
+    return _CONSTRUCTION_HISTORY[]
+end
+
+"""Clear the construction history in-place and return the cleared vector."""
+function clear_construction_history!()
+    empty!(_CONSTRUCTION_HISTORY[])
+    return _CONSTRUCTION_HISTORY[]
+end
+
+"""Dump the construction history to `path` as a simple textual report.
+Each entry contains the object's label and a `show` rendering of its data.
+"""
+function dump_construction_history(path::AbstractString)
+    open(path, "w") do io
+        for g in _CONSTRUCTION_HISTORY[]
+            println(io, "Label: ", g.label)
+            try
+                show(io, g.data)
+            catch
+                println(io, "<unshowable data>")
+            end
+            println(io, "\n---\n")
+        end
+    end
+    return path
+end
+
+"""Internal helper to append result(s) into the construction history.
+Accepts a single `GGBObject` or a vector of them."""
+function _push_construction_result!(res)
+    if isa(res, GGBObject)
+        push!(_CONSTRUCTION_HISTORY[], res)
+    elseif isa(res, AbstractVector{GGBObject})
+        append!(_CONSTRUCTION_HISTORY[], res)
+    end
+    return _CONSTRUCTION_HISTORY[]
+end
+
 
 """Encode a single `element`-shaped dict using the Python-side schema
 and send it to the applet via the `evalXML` API.
@@ -476,42 +521,103 @@ macro isdefined_in_module(mod, sym)
 end
 
 macro ggblab_command(expr)
-    function walk(ex, depth=0)
-        block = nothing
-        indent = repeat(" ", depth)
-        if ex isa Expr
-            # println(indent, "Expr Head: ", ex.head)
-            block = Expr(ex.head)
-            for arg in ex.args
-                push!(block.args, walk(arg, depth + 1))
+    # Two modes:
+    # - call-expr (e.g., Circle(A,1)): evaluate args at runtime so tokens
+    #   `_`, `__`, `_n` are expanded and GGBObject args are converted to labels.
+    # - other-expr (e.g., assignment `O = (0,0)`): fall back to string
+    #   construction at macro-expansion time (original behavior).
+    if expr isa Expr && expr.head == :call
+        name = expr.args[1]
+        arg_nodes = expr.args[2:end]
+
+        mapped_args = Any[]
+        for a in arg_nodes
+            if a isa Symbol
+                s = string(a)
+                if s == "_"
+                    push!(mapped_args, :(GeoGebra.construction_history()[end]))
+                    continue
+                elseif s == "__"
+                    push!(mapped_args, :(GeoGebra.construction_history()[end-1]))
+                    continue
+                elseif startswith(s, "_") && length(s) > 1
+                    numstr = s[2:end]
+                    if all(isdigit, collect(numstr))
+                        idx = parse(Int, numstr)
+                        push!(mapped_args, Expr(:ref, :(GeoGebra.construction_history()), idx))
+                        continue
+                    end
+                end
             end
-            return block
-        elseif ex isa Symbol
-            # Avoid evaluating symbols in the macro module; check the caller
-            # `Main` safely and fall back to the symbol itself on any error.
-            if isdefined(__module__, Symbol(ex))
-                v = getfield(__module__, Symbol(ex))
-                return isa(v, GGBObject) ? Symbol(v.label) : ex
+            push!(mapped_args, a)
+        end
+
+        esc_args = Any[]
+        for a in mapped_args
+            push!(esc_args, esc(a))
+        end
+        args_tuple = Expr(:tuple, esc_args...)
+
+        call_expr = Expr(:call, Expr(:call, :getfield, :(GeoGebra), QuoteNode(:send_command_eval)), QuoteNode(name), args_tuple)
+
+        return esc(:(let _res = $(call_expr)
+                        _proc = GeoGebra.process_labels_response(_res)
+                        try
+                            GeoGebra._push_construction_result!(_proc)
+                        catch
+                        end
+                        _proc
+                     end))
+    else
+        # Fallback: reproduce original static walk -> command string behavior
+        function walk(ex, depth=0)
+            block = nothing
+            indent = repeat(" ", depth)
+            if ex isa Expr
+                block = Expr(ex.head)
+                for arg in ex.args
+                    push!(block.args, walk(arg, depth + 1))
+                end
+                return block
+            elseif ex isa Symbol
+                if isdefined(__module__, Symbol(ex))
+                    v = getfield(__module__, Symbol(ex))
+                    return isa(v, GGBObject) ? Symbol(v.label) : ex
+                else
+                    return ex
+                end
+            elseif ex isa QuoteNode
+                return ex.value
             else
                 return ex
             end
-        elseif ex isa QuoteNode
-            # println(indent, "QuoteNode: ", typeof(ex), " = ", ex.value)
-            return ex.value
-        else
-            # println(indent, "Literal: ", typeof(ex), " = ", ex)
-            return ex
         end
+        cmd_str = string(walk(expr))
+        return esc(:(let _cmd = $(QuoteNode(cmd_str))
+                        _res = GeoGebra.process_labels_response(GeoGebra.send_command(_cmd))
+                        try
+                            GeoGebra._push_construction_result!(_res)
+                        catch
+                        end
+                        _res
+                     end))
     end
-    cmd_str = string(walk(expr))
-    # Build runtime code: send command, process labels, and refresh objects as needed
-    return esc(:(let _cmd = $(QuoteNode(cmd_str))
-                    GeoGebra.process_labels_response(GeoGebra.send_command(_cmd))
-                 end))
 end
 
 macro ggblab(args...)
     toks = args
+    # Helper: normalize a token to String when possible (Symbol, QuoteNode(:sym), or String)
+    function _tok_to_str(tok)
+        if isa(tok, QuoteNode) && isa(tok.value, Symbol)
+            return string(tok.value)
+        elseif isa(tok, Symbol)
+            return string(tok)
+        elseif isa(tok, String)
+            return tok
+        else
+            return nothing
+        end
+    end
     # If the macro was expanded with a leading LineNumberNode, the layout is
     # typically: (LineNumberNode, Module, expr...). Drop the first two in that case.
     if length(toks) >= 2 && toks[1] isa LineNumberNode
@@ -523,11 +629,32 @@ macro ggblab(args...)
     if length(toks) == 0
         error("@ggblab requires an expression")
     end
+    # Support special construction inspection syntax:
+    # - `@ggblab construction` -> returns the full construction history
+    # - `@ggblab construction[n]` -> returns the nth entry from history
+    if length(toks) >= 1
+        first = toks[1]
+        is_cons_str = s -> (isa(s, String) && length(s) >= 4 && startswith(s, "cons"))
+        if first isa Expr && first.head == :ref
+            headsym = first.args[1]
+            hstr = _tok_to_str(headsym)
+            if is_cons_str(hstr)
+                idx = first.args[2]
+                return esc(Expr(:ref, :(GeoGebra.construction_history()), idx))
+            end
+        else
+            fstr = _tok_to_str(first)
+            if is_cons_str(fstr)
+                return esc(:(GeoGebra.construction_history()))
+            end
+        end
+    end
     ex = nothing
     if length(toks) == 1
         ex = toks[1]
     else
-        if toks[1] === :api
+        tokstr = _tok_to_str(toks[1])
+        if tokstr == "api"
             if length(toks) < 2
                 error("@ggblab api usage must be like `@ggblab api fn(args...)`")
             end
@@ -574,6 +701,8 @@ macro await(expr)
              end)
 end
 
-export request, poll_reply, request_with_retry, set_default_host, set_default_port, send_command, send_function, send_command_eval, send_function_eval, fetch_object, refresh, refresh!, GGBObject, set_object!, set!, evalXML_from_element, @ggblab, @ggb, @ggblab_command, @ggblab_function, @await
+
+
+export request, poll_reply, request_with_retry, set_default_host, set_default_port, send_command, send_function, send_command_eval, send_function_eval, fetch_object, refresh, refresh!, GGBObject, set_object!, set!, construction_history, clear_construction_history!, dump_construction_history, evalXML_from_element, @ggblab, @ggb, @ggblab_command, @ggblab_function, @await
 
 end # module
