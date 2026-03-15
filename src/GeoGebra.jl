@@ -158,49 +158,42 @@ end
 Base.show(io::IO, ::MIME"text/plain", g::GGBObject) = print(io, g.label)
 Base.show(io::IO, g::GGBObject) = print(io, g.data)
 
-# Implicit construction history (default construction protocol storage).
+# Implicit construction protocol (default construction protocol storage).
 # Use a `Ref` to allow rebinding the contained vector without changing the
 # exported binding; users should use provided APIs rather than touching this.
-const _CONSTRUCTION_HISTORY = Ref{Vector{GGBObject}}(GGBObject[])
+const _CONSRUCTION_PROTOCOL = Ref{Vector{GGBObject}}(GGBObject[])
 
-"""Return the current construction history vector (live reference)."""
-function construction_history()
-    return _CONSTRUCTION_HISTORY[]
+"""Return the current construction protocol vector (live reference)."""
+function construction_protocol()
+    return _CONSRUCTION_PROTOCOL[]
 end
 
-"""Clear the construction history in-place and return the cleared vector."""
-function clear_construction_history!()
-    empty!(_CONSTRUCTION_HISTORY[])
-    return _CONSTRUCTION_HISTORY[]
+"""Start a new construction by clearing the construction history in-place
+and return the cleared vector. Named `new_construction!` to mirror the
+GeoGebra API `newConstruction()`.
+"""
+function new_construction!()
+    # Call the GeoGebra bridge to create a new construction, clear local
+    # protocol, and return the bridge response.
+    resp = send_function("newConstruction")
+    empty!(_CONSRUCTION_PROTOCOL[])
+    return _CONSRUCTION_PROTOCOL[]
 end
 
 """Dump the construction history to `path` as a simple textual report.
 Each entry contains the object's label and a `show` rendering of its data.
 """
-function dump_construction_history(path::AbstractString)
-    open(path, "w") do io
-        for g in _CONSTRUCTION_HISTORY[]
-            println(io, "Label: ", g.label)
-            try
-                show(io, g.data)
-            catch
-                println(io, "<unshowable data>")
-            end
-            println(io, "\n---\n")
-        end
-    end
-    return path
-end
+ 
 
 """Internal helper to append result(s) into the construction history.
 Accepts a single `GGBObject` or a vector of them."""
 function _push_construction_result!(res)
     if isa(res, GGBObject)
-        push!(_CONSTRUCTION_HISTORY[], res)
+        push!(_CONSRUCTION_PROTOCOL[], res)
     elseif isa(res, AbstractVector{GGBObject})
-        append!(_CONSTRUCTION_HISTORY[], res)
+        append!(_CONSRUCTION_PROTOCOL[], res)
     end
-    return _CONSTRUCTION_HISTORY[]
+    return _CONSRUCTION_PROTOCOL[]
 end
 
 
@@ -535,16 +528,16 @@ macro ggblab_command(expr)
             if a isa Symbol
                 s = string(a)
                 if s == "_"
-                    push!(mapped_args, :(GeoGebra.construction_history()[end]))
+                    push!(mapped_args, :(GeoGebra.construction_protocol()[end]))
                     continue
                 elseif s == "__"
-                    push!(mapped_args, :(GeoGebra.construction_history()[end-1]))
+                    push!(mapped_args, :(GeoGebra.construction_protocol()[end-1]))
                     continue
                 elseif startswith(s, "_") && length(s) > 1
                     numstr = s[2:end]
                     if all(isdigit, collect(numstr))
                         idx = parse(Int, numstr)
-                        push!(mapped_args, Expr(:ref, :(GeoGebra.construction_history()), idx))
+                        push!(mapped_args, Expr(:ref, :(GeoGebra.construction_protocol()), idx))
                         continue
                     end
                 end
@@ -570,6 +563,81 @@ macro ggblab_command(expr)
                      end))
     else
         # Fallback: reproduce original static walk -> command string behavior
+        # BUT: if the expression is an index/array-literal/quoted-index that
+        # is intended as a construction lookup (e.g. `@ggb[1]`, `@ggb["O"]`),
+        # handle those forms here to avoid sending them as commands.
+        if expr isa Expr && (expr.head == :ref || expr.head == :vect)
+            # Delegate to the macro-level handling by constructing an Expr
+            # that queries the protocol at runtime.
+            if expr.head == :vect && length(expr.args) == 1
+                lbl = expr.args[1]
+                lblstr = isa(lbl, QuoteNode) && isa(lbl.value, String) ? lbl.value : (isa(lbl, Symbol) ? string(lbl) : nothing)
+                if lblstr !== nothing
+                    return esc(:(begin
+                        ch = GeoGebra.construction_protocol()
+                        lbls = [g for g in ch if g.label == $(QuoteNode(lblstr))]
+                        isempty(lbls) ? lbls : lbls[end]
+                    end))
+                end
+            elseif expr.head == :ref
+                args_ref = expr.args
+                if length(args_ref) == 0
+                    return esc(:(GeoGebra.construction_protocol()))
+                elseif length(args_ref) == 1
+                    idx_node = args_ref[1]
+                    lbl = isa(idx_node, QuoteNode) && isa(idx_node.value, String) ? idx_node.value : (isa(idx_node, Symbol) ? string(idx_node) : nothing)
+                    if lbl !== nothing
+                        return esc(:(begin
+                            ch = GeoGebra.construction_protocol()
+                                lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
+                                isempty(lbls) ? lbls : lbls[end]
+                        end))
+                    else
+                        # non-label single-ref form: fall through to command fallback
+                    end
+                elseif length(args_ref) == 2
+                    # form like construction[idx]
+                    idx_node = args_ref[2]
+                    lbl = isa(idx_node, QuoteNode) && isa(idx_node.value, String) ? idx_node.value : (isa(idx_node, Symbol) ? string(idx_node) : nothing)
+                    if lbl !== nothing
+                        return esc(:(begin
+                            ch = GeoGebra.construction_protocol()
+                            lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
+                            isempty(lbls) ? lbls : lbls[end]
+                        end))
+                    else
+                        # non-label two-arg ref: fall through to command fallback
+                    end
+                end
+            end
+        end
+        # Also handle QuoteNode forms like QuoteNode("[1]") which can appear
+        # in macroexpand output; treat strings of the form "[n]" or "[\"O\"]".
+        if expr isa QuoteNode && isa(expr.value, String)
+            s = expr.value
+            mnum = match(r"^\[(\-?\d+)\]$", s)
+            if mnum !== nothing
+                idx = parse(Int, mnum.captures[1])
+                return esc(:(let ch = GeoGebra.construction_protocol()
+                                if idx == 0
+                                    throw(BoundsError("index 0 invalid"))
+                                elseif idx > 0
+                                    ch[$(idx)]
+                                else
+                                    ch[end + $(idx) + 1]
+                                end
+                             end))
+            end
+            mstr = match(r"^\[\"(.+)\"\]$", s)
+            if mstr !== nothing
+                lbl = mstr.captures[1]
+                    return esc(:(begin
+                        ch = GeoGebra.construction_protocol()
+                        lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
+                        isempty(lbls) ? lbls : lbls[end]
+                    end))
+            end
+        end
         function walk(ex, depth=0)
             block = nothing
             indent = repeat(" ", depth)
@@ -626,8 +694,91 @@ macro ggblab(args...)
         # Some callsites include just the Module as the first token; drop it.
         toks = toks[2:end]
     end
-    if length(toks) == 0
-        error("@ggblab requires an expression")
+
+    # Special-case: handle call-form label lookup like `@ggblab :const(:O)`
+    # Treat `:const(:O)` as a label lookup (equivalent to @ggb["O"]) so that
+    # bracket-based indexing remains dedicated to slice/index forms.
+    if length(toks) >= 2
+        f = toks[1]
+        s = toks[2]
+        # Get a safe string representation for the first token (f).
+        fstr = _tok_to_str(f)
+        if fstr === nothing
+            try
+                fstr = string(f)
+            catch
+                fstr = ""
+            end
+        end
+        # Consider it a `construction` shorthand if the token text contains "cons".
+        if !isempty(fstr) && occursin("cons", lowercase(fstr)) && s isa Expr && s.head == :call && length(s.args) >= 1
+            arg = s.args[1]
+            lbl = _tok_to_str(arg)
+            if lbl === nothing
+                try
+                    lbl = string(arg)
+                catch
+                    lbl = nothing
+                end
+            end
+                if lbl !== nothing
+                return esc(:(begin ch = GeoGebra.construction_protocol(); lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]; isempty(lbls) ? lbls : lbls[end] end))
+            end
+        end
+    end
+    if length(toks) == 1
+        ex = toks[1]
+        # Handle call-form provided as a single token: e.g. `@ggb :const(:O)`
+        if ex isa Expr && ex.head == :call && length(ex.args) >= 2
+            fn = ex.args[1]
+            fnstr = _tok_to_str(fn)
+            if fnstr === nothing
+                try
+                    fnstr = string(fn)
+                catch
+                    fnstr = nothing
+                end
+            end
+            if fnstr !== nothing && startswith(fnstr, "cons")
+                # extract inner arg which may be Symbol, QuoteNode, or Expr
+                arg = ex.args[2]
+                if arg isa Expr && length(arg.args) >= 1
+                    cand = arg.args[1]
+                else
+                    cand = arg
+                end
+                lbl = _tok_to_str(cand)
+                if lbl === nothing
+                    try
+                        lbl = string(cand)
+                    catch
+                        lbl = nothing
+                    end
+                end
+                if lbl !== nothing && lbl != ":" && lbl != "end"
+                    return esc(:(begin ch = GeoGebra.construction_protocol(); lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]; isempty(lbls) ? lbls : lbls[end] end))
+                end
+            end
+        end
+        # Early-handle common indexed/quoted forms so they are treated as
+        # construction lookups instead of falling through to command send.
+        # numeric indexing intentionally unsupported here; fall through
+        if ex isa QuoteNode && isa(ex.value, String)
+            s = ex.value
+            # Only support string label forms like ["O"] here
+            mstr = match(r"^\s*\[\s*\"(.+)\"\s*\]\s*$", s)
+                if mstr !== nothing
+                lbl = mstr.captures[1]
+                return esc(:(begin ch = GeoGebra.construction_protocol(); lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]; isempty(lbls) ? lbls : lbls[end] end))
+            end
+        end
+        if ex isa Expr && ex.head == :vect && length(ex.args) == 1
+            # single-element vector literal: treat as label lookup when possible
+            lbl = _tok_to_str(ex.args[1])
+            if lbl !== nothing
+                return esc(:(begin ch = GeoGebra.construction_protocol(); lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]; isempty(lbls) ? lbls : lbls[end] end))
+            end
+        end
     end
     # Support special construction inspection syntax:
     # - `@ggblab construction` -> returns the full construction history
@@ -635,23 +786,164 @@ macro ggblab(args...)
     if length(toks) >= 1
         first = toks[1]
         is_cons_str = s -> (isa(s, String) && length(s) >= 4 && startswith(s, "cons"))
+        # Shortcut commands under the `:const` namespace, e.g.:
+        # - `@ggb :const :new`  -> start a new construction (clears history)
+        # - `@ggb :const :undo` -> undo last construction entry (returns nothing)
+        fstr_top = _tok_to_str(first)
+        if fstr_top !== nothing && is_cons_str(fstr_top) && length(toks) >= 2
+            snd = toks[2]
+            sndstr = _tok_to_str(snd)
+            if sndstr === "new"
+                # Call the module function which itself invokes the bridge API.
+                return esc(:(GeoGebra.new_construction!()))
+            elseif sndstr === "undo"
+                return esc(:(let ch = GeoGebra.construction_protocol(); if !isempty(ch)
+                                    g = pop!(ch)
+                                    try
+                                        GeoGebra.send_function("deleteObject", g.label)
+                                    catch
+                                    end
+                                end; nothing end))
+            end
+        end
+        if first isa Expr && first.head == :vect
+            # Handle array-literal form like @ggb["O"] where the macro sees
+            # an Expr(:vect, elem...). If single-element and the element is a
+            # string/symbol/quoted symbol, treat as label lookup into construction.
+            elems = first.args
+            if length(elems) == 1
+                lbl = _tok_to_str(elems[1])
+                if lbl !== nothing
+                    expr = :(begin
+                        ch = GeoGebra.construction_protocol()
+                        lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
+                        isempty(lbls) ? lbls : lbls[end]
+                    end)
+                    return esc(expr)
+                end
+            end
+        end
+
         if first isa Expr && first.head == :ref
-            headsym = first.args[1]
-            hstr = _tok_to_str(headsym)
-            if is_cons_str(hstr)
-                idx = first.args[2]
-                return esc(Expr(:ref, :(GeoGebra.construction_history()), idx))
+            args_ref = first.args
+            # Case 0: empty index -> return all construction entries
+            if length(args_ref) == 0
+                return esc(:(GeoGebra.construction_protocol()))
+            end
+            # Case A: form like `construction[idx]` (two-arg ref)
+            if length(args_ref) == 2
+                headsym = args_ref[1]
+                hstr = _tok_to_str(headsym)
+                if is_cons_str(hstr)
+                    idx_node = args_ref[2]
+                    # If the index node is a parenthesized/call form like `(:O)`
+                    # or `:const(:O)`, extract the inner token and treat it as a
+                    # label lookup. Otherwise fall back to direct token-to-string.
+                    if idx_node isa Expr && (idx_node.head == :call || idx_node.head == :paren) && length(idx_node.args) >= 1
+                        lbl = _tok_to_str(idx_node.args[1])
+                    else
+                        lbl = _tok_to_str(idx_node)
+                    end
+                    if lbl !== nothing && lbl != ":" && lbl != "end"
+                        expr = :(begin
+                            ch = GeoGebra.construction_protocol()
+                            lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
+                            isempty(lbls) ? lbls : lbls[end]
+                        end)
+                        return esc(expr)
+                    else
+                        # Simplified support: accept full-slice `:`/`[:]`, `[end]`,
+                        # or a positive integer index like `1` or `[1]`.
+                        # Handle various parser node shapes for slice/index forms
+                        # Prefer structural checks when possible (Expr/Symbol),
+                        # falling back to string-matching for QuoteNode/text forms.
+                        if isa(idx_node, Expr)
+                            # vector literal form like `[:]' or `[:]' -> Expr(:vect, ...)
+                            if idx_node.head == :vect && length(idx_node.args) == 1
+                                e = idx_node.args[1]
+                                if isa(e, Symbol) && string(e) == ":"
+                                    return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
+                                elseif isa(e, Symbol) && string(e) == "end"
+                                    return esc(:(let ch = GeoGebra.construction_protocol(); g = ch[end]; (length(ch), g.label, GeoGebra.send_function("getCommandString", g.label)) end))
+                                end
+                            end
+                            # direct colon expression (rare) -> treat as full slice
+                            if idx_node.head == :colon
+                                return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
+                            end
+                        end
+                        s = isa(idx_node, QuoteNode) && isa(idx_node.value, String) ? idx_node.value : string(idx_node)
+                        # Full-slice forms -> return all tuples
+                        if strip(s) == ":" || match(r"^\s*\[\s*:\s*\]\s*$", s) !== nothing
+                            return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
+                        end
+                        # [end]
+                        if match(r"^\s*\[?\s*end\s*\]?\s*$", s) !== nothing
+                            return esc(:(let ch = GeoGebra.construction_protocol(); g = ch[end]; (length(ch), g.label, GeoGebra.send_function("getCommandString", g.label)) end))
+                        end
+                        # Positive integer index fallback like "1" or "[1]"
+                        m = match(r"^\s*\[?\s*(\d+)\s*\]?\s*$", s)
+                        if m !== nothing
+                            numstr = m.captures[1]
+                            return esc(:(let ch = GeoGebra.construction_protocol();
+                                            idx = parse(Int, $(QuoteNode(numstr)));
+                                            if idx == 0
+                                                throw(BoundsError("index 0 invalid"))
+                                            end
+                                            g = ch[idx]
+                                            (idx, g.label, GeoGebra.send_function("getCommandString", g.label))
+                                         end))
+                        end
+                        # non-label two-arg ref: fall through to command fallback
+                    end
+                end
+            # Case B: form like `@ggb[idx]` (single-arg ref) — treat as construction lookup
+            elseif length(args_ref) == 1
+                idx_node = args_ref[1]
+                lbl = _tok_to_str(idx_node)
+                if lbl !== nothing
+                    expr = :(begin
+                        ch = GeoGebra.construction_protocol()
+                        lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
+                        isempty(lbls) ? lbls : lbls[end]
+                    end)
+                    return esc(expr)
+                else
+                    # non-label single-ref: fall through to command fallback
+                end
             end
         else
             fstr = _tok_to_str(first)
             if is_cons_str(fstr)
-                return esc(:(GeoGebra.construction_history()))
+                return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
             end
         end
     end
     ex = nothing
     if length(toks) == 1
         ex = toks[1]
+        # Additional handling: if macro is invoked with a bare index form like
+        # `@ggb[1]` the parser may present the index as various node types
+        # (Integer, QuoteNode("[1]"), Expr(:vect,...)). Normalize common
+        # cases here so they are treated as construction lookups rather than
+        # falling back to sending a command string.
+        # Normalize single-token vector forms (label lookup). Numeric bare-index
+        # forms (e.g. @ggb[1]) are intentionally not supported and will fall
+        # through to the command fallback — this keeps behavior consistent
+        # with @ggb[:O] / @ggb["O"] label lookups which are supported above.
+        if ex isa Expr && ex.head == :vect
+            elems = ex.args
+            if length(elems) == 1
+                lbl = _tok_to_str(elems[1])
+                if lbl !== nothing
+                        return esc(:((begin
+                        ch = GeoGebra.construction_protocol()
+                        lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
+                        isempty(lbls) ? lbls : lbls[end]
+                    end)))
+                end
+            end
+        end
     else
         tokstr = _tok_to_str(toks[1])
         if tokstr == "api"
@@ -703,6 +995,6 @@ end
 
 
 
-export request, poll_reply, request_with_retry, set_default_host, set_default_port, send_command, send_function, send_command_eval, send_function_eval, fetch_object, refresh, refresh!, GGBObject, set_object!, set!, construction_history, clear_construction_history!, dump_construction_history, evalXML_from_element, @ggblab, @ggb, @ggblab_command, @ggblab_function, @await
+export request, poll_reply, request_with_retry, set_default_host, set_default_port, send_command, send_function, send_command_eval, send_function_eval, fetch_object, refresh, refresh!, GGBObject, set_object!, set!, construction_protocol, new_construction!, evalXML_from_element, @ggblab, @ggb, @ggblab_command, @ggblab_function, @await
 
 end # module
