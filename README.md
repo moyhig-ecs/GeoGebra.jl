@@ -150,3 +150,71 @@ communicate with the injected GeoGebra applet through the bridge because
 the bridge forwards messages into the kernel's comm manager. Ensure your
 JupyterHub configuration restricts access to the notebook server's host
 and ports according to your site security policy.
+
+Standalone comm_bridge note & planned extraction
+-----------------------------------------------
+
+A practical note about current architecture and a potential refactor:
+
+- The `comm_bridge` component can operate independently as a kernel↔frontend
+  conduit even if the GeoGebra `AppletInjector` is not called. In other
+  words, the bridge continues to function as a communication channel when
+  the injector is not instantiated.
+
+- During recent refactoring we extracted `ggblab_core`/`ggblab_core2` and
+  `comm_bridge` into separate components. We are considering (but not
+  implementing now) extracting the frontend-side `callRemoteSocketSend`
+  helper out of the monolithic frontend and publishing it as a small,
+  reusable frontend helper that pairs directly with `comm_bridge`.
+
+- The intended outcome of that future work would be:
+  1. A minimal frontend helper exposing a safe `callRemoteSocketSend`
+     API and an optional small global export for WebIO/JS handlers.
+  2. Pairing that helper with `comm_bridge` so frontends and kernels can
+     communicate via the OOB socket without pulling in the entire ggblab
+     frontend stack.
+  3. Rebuilding ggblab on top of this pair to restore full functionality
+     while keeping the bridge and helper reusable for other projects.
+
+- This is a design note only; it is not implemented in the current
+  release. If you would like to see this extraction implemented, please
+  open an issue or submit a pull request describing the desired API and
+  packaging constraints.
+
+Why WebIO works but Interact.jl often does not
+-----------------------------------------------
+
+Short explanation of the practical difference and current limitations:
+
+- `WebIO.jl` primarily provides a rendering layer that injects DOM nodes
+  and JavaScript into the browser. It is able to run JS event handlers on
+  the client side and can call back to kernel-side code when a working
+  communication path exists. Because our current architecture exposes a
+  socket-based OOB (out‑of‑band) bridge that the browser can reach via
+  the console/kernel `requestExecute` pattern, simple WebIO-based UI
+  elements and JS handlers can be made to work by calling that bridge
+  (for example, via the `ggblab.listen` helper).
+
+- `Interact.jl` builds higher-level, two-way widget abstractions on top of
+  `WebIO` and the Jupyter Comm system: it expects a live, bidirectional
+  comm channel between the kernel process and the frontend so that
+  `Observable` values synchronize automatically. In many deployment
+  scenarios (multi-process Julia setups, kernels started via the
+  console, or environments behind reverse proxies/CORS policies like
+  some JupyterHub setups) the native kernel↔frontend comm manager is not
+  directly accessible to Julia processes or to widget subprocesses.
+
+- Practically this means `Interact.jl`'s seamless two‑way bindings fail
+  when the kernel process cannot register or receive comm messages in
+  the usual way. WebIO can still deliver one‑way JS handlers and DOM
+  insertion, but full Interact functionality that relies on the kernel's
+  comm manager (automatic `Observable` sync, widget state restored via
+  comms) is not available without a restored direct comm channel.
+
+- The current recommended workaround is to route frontend events through
+  the `comm_bridge` (via `requestExecute`-issued sends or the
+  `callRemoteSocketSend` helper) and update server-side state explicitly
+  (e.g. updating `shared_objects` and broadcasting diffs). This restores
+  a usable UI→kernel loop at the cost of the tight, automatic two‑way
+  binding Interact normally provides.
+
