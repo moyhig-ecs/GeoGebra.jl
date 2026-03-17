@@ -9,6 +9,7 @@ JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
 SymPyPythonCall = "bc8888f7-b21e-4b7c-a06a-5d9c9496438c"
 WebIO = "0f1e0344-ec1d-5b48-a673-e5cf874b6c29"
+OOBClient = "3f2a1b84-7c6d-4e2b-9a12-0f1e2d3c4b5a"
 
 [compat]
 JSExpr = "0.5.4"
@@ -16,3 +17,4 @@ JSON = "0.21.4"
 SymPyPythonCall = "0.5.1"
 WebIO = "0.8.21"
 julia = ">=1.8, <2.0"
+OOBClient = "0.1"
