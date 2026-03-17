@@ -1,5 +1,13 @@
 module GeoGebra
 
+# Include package-local OOBClient implementation and expose it from this package
+try
+    include("OOBClient.jl")
+    using .OOBClient
+catch
+    # Fail silently; OOBClient is optional in some contexts
+end
+
 """Simple TCP JSON bridge client for use from Julia (IJulia/PyCall testing).
 
 Provides `request`, `poll_reply`, and `request_with_retry` functions equivalent
@@ -26,6 +34,11 @@ using PythonCall
 # Defaults are mutable so users can change the bridge host/port at runtime
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+
+# NOTE: Prefer explicit `pyimport("ggblab.comm_bridge").connect()` or
+# direct `pyimport("ggblab.schema")` usage from Julia rather than a
+# module-global lazy-import wrapper. The previous `LazyPyModule` pattern
+# caused complexity and eager-import problems in some environments.
 
 
 
@@ -206,9 +219,11 @@ produced in `GGBObject.data["element"][i]`.
 function evalXML_from_element(elem_data; host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
     try
         xmlschema = PythonCall.pyimport("xmlschema")
-        pyggb = PythonCall.pyimport("ggblab")
+        # Use the Python-side ggblab.schema wrapper for encode/decode.
+        ggb_schema = PythonCall.pyimport("ggblab.schema").ggb_schema()
+        schema = ggb_schema.schema
         # Encode the element into an ElementTree (or compatible object)
-        encoded = getproperty(pyggb, :schema).encode(elem_data, "element")
+        encoded = schema.encode(elem_data, "element")
         # Serialize to bytes/string using xmlschema helper
         xml_str = xmlschema.etree_tostring(encoded)
         return send_function("evalXML", xml_str; host=host, port=port)
@@ -297,8 +312,10 @@ function fetch_object(label::AbstractString)
         throw(ErrorException("Failed to get XML for label $(label): $(e)"))
     end
     try
-        py = PythonCall.pyimport("ggblab")
-        schema = getproperty(py, :schema)
+        # Use the ggblab.schema entrypoint for decode to ensure we call
+        # the correct wrapper object: ggb_schema().schema
+        ggb_schema = PythonCall.pyimport("ggblab.schema").ggb_schema()
+        schema = ggb_schema.schema
         s = strip(xml_str)
         if startswith(s, "<construction")
             xml_to_decode = s
@@ -995,6 +1012,6 @@ end
 
 
 
-export request, poll_reply, request_with_retry, set_default_host, set_default_port, send_command, send_function, send_command_eval, send_function_eval, fetch_object, refresh, refresh!, GGBObject, set_object!, set!, construction_protocol, new_construction!, evalXML_from_element, @ggblab, @ggb, @ggblab_command, @ggblab_function, @await
+export request, poll_reply, request_with_retry, set_default_host, set_default_port, send_command, send_function, send_command_eval, send_function_eval, fetch_object, refresh, refresh!, GGBObject, set_object!, set!, construction_protocol, new_construction!, evalXML_from_element, @ggblab, @ggb, @ggblab_command, @ggblab_function, @await, OOBClient
 
 end # module
