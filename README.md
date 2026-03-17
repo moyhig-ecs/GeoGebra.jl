@@ -218,3 +218,25 @@ Short explanation of the practical difference and current limitations:
   a usable UI→kernel loop at the cost of the tight, automatic two‑way
   binding Interact normally provides.
 
+Pending: WebIO / comm send-side implementation
+-----------------------------------------------
+
+- Note (pending): Historically `WebIO` and `IJulia` communicated using
+  the Jupyter `comm` channels. Recent JupyterLab revisions have
+  introduced tighter restrictions on `comm` connectivity which prevents
+  those communications from functioning in some environments.
+
+- A possible workaround is to `import` the frontend package
+  `@webio/webio` and hook into its `setSendCallback` and `dispatch`
+  APIs so the frontend can route outgoing messages through the OOB
+  bridge. However, the current `OOBClient` implementation only
+  includes a receive-side channel; the send-side channel is not yet
+  implemented.
+
+- Because implementing the send path requires frontend and OOBClient
+  changes (and integration testing across JupyterLab versions), this
+  work is currently pending. The local minimal provider
+  `julia/WebIO.jl/src/providers/ggblab.jl` exists to make experimentation
+  easier, but a full, tested implementation of the send-side is not
+  included in this repository yet.
+
