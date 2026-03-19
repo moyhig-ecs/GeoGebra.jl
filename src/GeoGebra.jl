@@ -46,6 +46,30 @@ include("comm_direct.jl")
 
 export CommBridge
 
+# Transport helpers: allow switching CommBridge request handler to use the
+# kernel-side direct comm registered by `comm_direct.jl`. By default
+# `CommBridge` uses the TCP bridge; call `enable_direct_transport!()` to
+# route requests via the first available registered comm connection.
+function enable_direct_transport!()
+    # handler uses first registered comm in comm_direct registry
+    function _direct_handler(payload)
+        keys = list_registered_comm_keys()
+        if isempty(keys)
+            throw(ErrorException("comm_direct: no registered comm connections"))
+        end
+        # use first registered connection
+        k = keys[1]
+        return send_via_key(k, payload)
+    end
+    CommBridge.set_request_handler!(_direct_handler)
+    return nothing
+end
+
+function disable_direct_transport!()
+    CommBridge.set_request_handler!(p -> CommBridge.request_tcp(p))
+    return nothing
+end
+
 # NOTE: Prefer explicit `pyimport("ggblab.comm_bridge").connect()` or
 # direct `pyimport("ggblab.schema")` usage from Julia rather than a
 # module-global lazy-import wrapper. The previous `LazyPyModule` pattern
@@ -111,8 +135,7 @@ resp = GeoGebra.request(Dict("type"=>"function", "payload"=>Dict("name"=>"getVer
 ```
 """
 function request(payload; host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT, timeout::Real=10.0)
-    data = isa(payload, String) ? payload : JSON.json(payload)
-    return _unwrap_reply(_send_and_recv(data; host=host, port=port, timeout=timeout))
+    return _unwrap_reply(CommBridge.request(payload; host=host, port=port, timeout=timeout))
 end
 
 """Send a textual GeoGebra command string directly to the bridge.
@@ -122,8 +145,7 @@ end
 unchanged as the command payload.
 """
 function send_command(cmd_text::AbstractString; host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
-    payload = Dict("type"=>"command", "payload"=>cmd_text)
-    return request(payload; host=host, port=port)
+    return CommBridge.send_command(cmd_text; host=host, port=port)
 end
 
 """Send a function call payload to the bridge.
@@ -133,42 +155,19 @@ strings and sent inside the `payload` object:
 `{"type":"function","payload":{"name":...,"args":[...]}}`.
 """
 function send_function(name, args...; host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
-    name_str = isa(name, Symbol) ? string(name) : string(name)
-    arg_strs = [string(a) for a in args]
-    args_field = length(arg_strs) == 0 ? nothing : arg_strs
-    payload = Dict("type"=>"function", "payload"=>Dict("name"=>name_str, "args"=>args_field))
-    resp = request(payload; host=host, port=port)
-    try
-        if resp isa AbstractDict && haskey(resp, "value")
-            return resp["value"]
-        elseif resp isa AbstractDict && haskey(resp, "payload")
-            p = resp["payload"]
-            if p isa AbstractDict && haskey(p, "value")
-                return p["value"]
-            end
-        end
-    catch
-        # fall through and return original response on any error
-    end
-    return resp
+    return CommBridge.send_function(name, args...; host=host, port=port)
 end
 
 """Helper called by the macro: evaluate an argument tuple and call `send_command`.
 When arguments include a `GGBObject`, replace it with its `label` before sending."""
 function send_command_eval(name, args_tuple)
-    # evaluate and normalize args: replace GGBObject with its label
-    args = Tuple((isa(a, GGBObject) ? a.label : a) for a in args_tuple)
-    name_str = isa(name, Symbol) ? string(name) : string(name)
-    arg_strs = [string(a) for a in args]
-    cmd_text = string(name_str, "(", join(arg_strs, ", "), ")")
-    return send_command(cmd_text; host=DEFAULT_HOST, port=DEFAULT_PORT)
+    return CommBridge.send_command_eval(name, args_tuple; host=DEFAULT_HOST, port=DEFAULT_PORT)
 end
 
 """Helper called by the macro: evaluate an argument tuple and call `send_function`.
 When arguments include a `GGBObject`, replace it with its `label` before sending."""
 function send_function_eval(name, args_tuple)
-    args = Tuple((isa(a, GGBObject) ? a.label : a) for a in args_tuple)
-    return send_function(name, args...; host=DEFAULT_HOST, port=DEFAULT_PORT)
+    return CommBridge.send_function_eval(name, args_tuple; host=DEFAULT_HOST, port=DEFAULT_PORT)
 end
 
 
