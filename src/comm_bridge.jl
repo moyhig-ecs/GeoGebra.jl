@@ -1,7 +1,7 @@
 module CommBridge
 
 using JSON
-using PythonCall
+# using PythonCall
 
 # Simple TCP JSON bridge client utilities extracted from backup.
 # These functions implement a TCP transport for the bridge and are

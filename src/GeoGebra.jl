@@ -41,7 +41,8 @@ DEFAULT_PORT = 8765
 # Include comm bridge and transport switching helpers now that defaults exist
 include("comm_bridge.jl")
 using .CommBridge
-include("comm.jl")
+include("comm_control.jl")
+include("comm_direct.jl")
 
 export CommBridge
 
