@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "45ac15b7ac969cc04867d5ea6ea637b8efdabaec"
+project_hash = "41320365b6f6b447c05da5dff18c2e83af8368a4"
 
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
@@ -134,7 +134,7 @@ uuid = "de31a74c-ac4f-5751-b3fd-e18cd04993ca"
 version = "0.5.0"
 
 [[deps.GeoGebra]]
-deps = ["JSExpr", "JSON", "PythonCall", "SymPyPythonCall", "WebIO"]
+deps = ["JSExpr", "JSON", "Observables", "PythonCall", "SymPyPythonCall", "WebIO"]
 path = "."
 uuid = "db4dc2ca-38af-41b7-ab88-76237475b77d"
 version = "0.1.2"
@@ -581,7 +581,7 @@ version = "1.0.0"
 
 [[deps.WebIO]]
 deps = ["AssetRegistry", "Base64", "Distributed", "FunctionalCollections", "JSON", "Logging", "Observables", "Pkg", "Random", "Requires", "Sockets", "UUIDs", "WebSockets", "Widgets"]
-git-tree-sha1 = "0eef0765186f7452e52236fa42ca8c9b3c11c6e3"
+path = "/Users/manabu/work/WebIO.jl"
 uuid = "0f1e0344-ec1d-5b48-a673-e5cf874b6c29"
 version = "0.8.21"
 

@@ -8,6 +8,9 @@ catch
     # Fail silently; OOBClient is optional in some contexts
 end
 
+# comm bridge and transport switching helpers are included after defaults
+
+
 """Simple TCP JSON bridge client for use from Julia (IJulia/PyCall testing).
 
 Provides `request`, `poll_reply`, and `request_with_retry` functions equivalent
@@ -34,6 +37,13 @@ using PythonCall
 # Defaults are mutable so users can change the bridge host/port at runtime
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+
+# Include comm bridge and transport switching helpers now that defaults exist
+include("comm_bridge.jl")
+using .CommBridge
+include("comm.jl")
+
+export CommBridge
 
 # NOTE: Prefer explicit `pyimport("ggblab.comm_bridge").connect()` or
 # direct `pyimport("ggblab.schema")` usage from Julia rather than a
