@@ -179,26 +179,36 @@ Note: make sure the Python environment into which you install `ggblab`
 is the same kernel environment that runs JupyterLab (or the one your
 bridge connects to) so the bridge and injected applet are available.
 
-IJulia `Comm` and subprocess limitations
----------------------------------------
+IJulia `Comm` — capabilities and practical limits
+------------------------------------------------
 
-IJulia's `Comm` implementation talks directly with the kernel's
-ZMQ/ipykernel comm layer and is compatible with modern JupyterLab (including
-JupyterLab 4). In typical single-process setups where the Julia session is
-the kernel process, `IJulia` comms work as expected and provide a low-latency
-bidirectional channel to the frontend.
+Summary: `IJulia`'s `Comm` talks directly with the kernel's ZMQ/ipykernel
+comm layer and works well in standard kernel-hosted, single-process
+sessions (injection, low-latency two-way messages, applet control). Two
+practical limitations to be aware of follow.
 
-The limitation arises when Julia code is executed in a separate subprocess or
-from a process that does not share the kernel process and its comm manager.
-In those multi-process or out-of-process scenarios the subprocess cannot
-register comms on the kernel's comm manager, so direct `ipykernel.comm`
-connections from the subprocess will not reach the frontend.
+1) Subprocess / multi-process environments
+- If your Julia code runs in a subprocess or a separate process that does
+  not share the kernel's comm manager, that process cannot register comms
+  with the kernel and direct `ipykernel.comm` connections will not reach
+  the frontend. In such deployment cases the `comm_bridge` TCP/JSON bridge
+  remains the reliable fallback (it forwards JSON into the kernel's
+  comm manager over a local socket).
 
-For these deployment cases (subprocess workers, external tools, or isolated
-environments) the `comm_bridge` TCP/JSON bridge remains the reliable fallback:
-it accepts JSON messages over a local socket and forwards them into the
-kernel's comm manager so external processes can interoperate with the
-JupyterLab applet even when they cannot attach a native `ipykernel.comm`.
+2) Receive-timing and in-band synchronous expectations
+- Even in kernel-hosted sessions we've observed that comm receive
+  callbacks may not be processed while a long-running cell is executing;
+  they are often delivered only after the cell completes. This means
+  code that waits synchronously for an immediate in-band reply during
+  cell execution can block or time out. To mitigate this we implemented
+  per-request `req_id` pairing and a non-blocking `send_and_wait_for_id`
+  helper, but the kernel lifecycle constraint remains a root cause.
+
+Implementation notes
+- When sending messages via `IJulia.send_comm`, prefer `Dict` payloads
+  (not raw JSON strings) to avoid method-dispatch errors; the frontend
+  now normalizes replies and includes `req_id` when present so kernel
+  pairing can match replies reliably.
 
 Security and JupyterHub
 -----------------------
@@ -244,99 +254,62 @@ A practical note about current architecture and a potential refactor:
   open an issue or submit a pull request describing the desired API and
   packaging constraints.
 
-Why WebIO works but Interact.jl often does not
+WebIO Comm status and Interact.jl compatibility
 -----------------------------------------------
 
-Short explanation of the practical difference and current limitations:
+Update: the WebIO compatibility issue we observed earlier has been
+addressed in our environment via a compatibility patch. As a result,
+`WebIO.jl`-based handlers and simple JS callbacks now function when the
+patched package or the upstream fix is present; see the patched fork
+link below for details.
 
-- `WebIO.jl` primarily provides a rendering layer that injects DOM nodes
-  and JavaScript into the browser. It is able to run JS event handlers on
-  the client side and can call back to kernel-side code when a working
-  communication path exists. Because our current architecture exposes a
-  socket-based OOB (out‑of‑band) bridge that the browser can reach via
-  the console/kernel `requestExecute` pattern, simple WebIO-based UI
-  elements and JS handlers can be made to work by calling that bridge
-  (for example, via the `ggblab.listen` helper).
+Key points:
+- `WebIO.jl`: The patched WebIO fork restores the ability for client-side
+  JS handlers to deliver events into the kernel in our setups. If you
+  install the patched fork (or the upstream PR once merged) WebIO
+  widgets and one‑way JS callbacks will work without requiring the
+  `comm_bridge` fallback.
+- `Interact.jl`: Interact still depends on a live, bidirectional comm
+  manager and on certain widget lifecycle behaviors. Those higher-level
+  two‑way bindings can fail in multi-process, subprocess, or reverse
+  proxy environments where the kernel's comm manager is not fully
+  accessible. The underlying limitation (comm registration / lifecycle)
+  remains distinct from the WebIO compatibility bug that was fixed.
 
-- `Interact.jl` builds higher-level, two-way widget abstractions on top of
-  `WebIO` and the Jupyter Comm system: it expects a live, bidirectional
-  comm channel between the kernel process and the frontend so that
-  `Observable` values synchronize automatically. In many deployment
-  scenarios (multi-process Julia setups, kernels started via the
-  console, or environments behind reverse proxies/CORS policies like
-  some JupyterHub setups) the native kernel↔frontend comm manager is not
-  directly accessible to Julia processes or to widget subprocesses.
+Workarounds and recommendations:
+- Preferred: If you can, install the patched WebIO fork (or wait for the
+  upstream PR) to regain WebIO handler functionality. The fork is:
 
-- Practically this means `Interact.jl`'s seamless two‑way bindings fail
-  when the kernel process cannot register or receive comm messages in
-  the usual way. WebIO can still deliver one‑way JS handlers and DOM
-  insertion, but full Interact functionality that relies on the kernel's
-  comm manager (automatic `Observable` sync, widget state restored via
-  comms) is not available without a restored direct comm channel.
+  https://github.com/moyhig-ecs/WebIO.jl
 
-- The current recommended workaround is to route frontend events through
-  the `comm_bridge` (via `requestExecute`-issued sends or the
-  `callRemoteSocketSend` helper) and update server-side state explicitly
-  (e.g. updating `shared_objects` and broadcasting diffs). This restores
-  a usable UI→kernel loop at the cost of the tight, automatic two‑way
-  binding Interact normally provides.
+- If full `Interact.jl` two-way synchronization is required but your
+  environment prevents native comm registration, continue using the
+  `comm_bridge` OOB socket as a reliable fallback and explicitly route
+  frontend events into server-side handlers (for example via
+  `callRemoteSocketSend` or `requestExecute`).
 
-Pending: WebIO / comm send-side implementation
------------------------------------------------
-
-- Note (pending): while `IJulia` comms work in standard kernel-hosted
-  sessions, some deployment scenarios (multi-process Julia setups,
-  subprocess workers, reverse-proxy or restricted environments) can prevent
-  direct comm connectivity. In those cases routing events through the
-  `comm_bridge` or using explicit socket-based helpers remains the most
-  portable approach.
-
-  A potential enhancement is to provide a small frontend helper that can
-  route outgoing messages into the OOB bridge (for example via a
-  lightweight `callRemoteSocketSend` helper). The current `OOBClient`
-  implementation focuses on receive-side delivery; adding a robust
-  send-side integration requires coordinated frontend and kernel changes
-  and remains a planned improvement rather than a shipped feature.
+- For interactive code that expects immediate in-band replies during
+  long-running cell execution, prefer the `comm_bridge` transport by
+  default; the direct-comm path remains available as an opt-in when the
+  environment supports it.
 
 Why an OOB (out‑of‑band) channel is still needed
 -----------------------------------------------
 
-Although `IJulia` comms allow the Julia kernel to inject the GeoGebra
-applet and send synchronous requests in a typical kernel-hosted session,
-we observed that comm receive handlers in both the Python and Julia
-implementations are not invoked until the originating cell's execution
-completes. This means code that expects immediate, in-band replies during
-long-running cell execution can block or miss timely callbacks. For this
-reason the `comm_bridge` OOB channel remains necessary: it forwards
-messages into the kernel's comm manager via a separate socket and allows
-the frontend and external processes to exchange messages without relying
-on the kernel's single-threaded cell execution lifecycle. In short —
-`IJulia` comms work for injection and low-latency interactions, but the
-OOB bridge is required for robust cross-process and real-time reply
-delivery in the kinds of workflows ggblab supports.
+Even when `IJulia` comms are available and suitable for injection and
+low-latency interactions, the kernel's execution lifecycle can delay the
+processing of comm receive callbacks until after a running cell completes.
+That behavior makes in-band, synchronous reply semantics unreliable for
+long-running cells. The `comm_bridge` OOB socket forwards messages into the
+kernel's comm manager independently of cell execution and therefore restores
+reliable cross-process and real-time reply delivery where needed.
 
-WebIO.jl patch and availability
--------------------------------
-
-During investigation we found that `WebIO.jl`'s use of `IJulia` IPython
-Comm was not the root cause in our environment. A separate interoperability
-issue prevented the shipped `WebIO.jl` behavior from working as expected,
-so a private compatibility patch was developed and published to a fork for
-users needing the fix immediately. The patched package can be obtained from:
-
-https://github.com/moyhig-ecs/WebIO.jl
-
-Note: a PR has been submitted upstream but was not merged in time for our
-release, so the fork is provided as a stopgap until upstream incorporates
-the changes.
-
-Interact.jl status
-------------------
-
-`Interact.jl` fails in this repository for a different set of reasons (mainly
-around widget lifecycle and environment-specific comm registration) and has
-not yet been addressed. Work on `Interact.jl` compatibility is planned but
-outstanding.
+Policy reminder:
+- Use `comm_bridge` as the default transport for broad compatibility and
+  for code that expects immediate replies during execution.
+- Use the improved direct-comm path (with `req_id` pairing) as an opt-in in
+  environments where direct comms are known to behave reliably (see
+  `enable_direct_transport!()`).
 
 <!-- END PRESERVED TAIL -->
 
