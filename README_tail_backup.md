@@ -1,62 +1,10 @@
+# GeoGebra.jl — README tail backup (lines 72-end)
 
-# GeoGebra.jl — summary of current comm design and status
-
-Backup: the previous README head (lines 1–71) has been moved to
-`README_head_backup.md` for reference.
-
-This document summarizes the current decisions and implementation status
-for GeoGebra.jl comm transports. Follow-up items and the rationale are
-kept concise below.
-
-1) Frontend parsing & reply pairing
-- Frontend (`src/comm/kernel_comm.ts`) was updated to accept both string
-  and object payloads from the frontend and to include an incoming
-  `req_id` in outgoing reply objects when present. This normalizes replies
-  so the kernel-side pairing logic can match replies to requests.
-
-2) Kernel-side direct comm pairing (opt-in)
-- `julia/GeoGebra.jl/src/comm_direct.jl` implements per-request pending
-  channels (`PENDING_REPLIES`) and a `send_and_wait_for_id` helper that
-  attaches a `req_id` to outgoing messages and waits for a matching reply.
-  The wait runs safely in a background task so comm callbacks are not
-  blocked in the receive handler.
-
-3) `@ggb` semantics and blocking considerations
-- `GeoGebra._auto_request_handler` was switched to use `send_and_wait_for_id`
-  so macros like `@ggb` can receive created values from the frontend without
-  exposing `@async` to callers. However, we observed that kernel-side
-  comm receive handlers are not always invoked during cell execution; they
-  may run only after the cell completes. Because of that timing constraint
-  synchronous in-band expectations can still time out in some environments.
-
-4) Transport policy — `comm_bridge` default, direct comm pending
-- To preserve compatibility with the Python `extra` module and to avoid
-  user-facing timing failures, the repository currently uses the TCP
-  `comm_bridge` as the default transport. The improved direct-comm path
-  (with `req_id` pairing) remains implemented and available as an opt-in
-  via `enable_direct_transport!()` for advanced users and experiments.
-
-Next steps (short)
-- Remove or gate diagnostic prints introduced during debugging.
-- Add regression tests validating `req_id` pairing for both transports.
-- Publish changes: pull/rebase to synchronize with remote, then push or
-  create a feature branch if preferred to avoid rebasing `main`.
-
-If you want, I can (pick one):
-- remove debug prints now and create a small test that exercises
-  `send_and_wait_for_id`, or
-- create a feature branch containing these changes and push it to
-  the remote so you can open a PR without rebasing `main`.
+This file preserves the original latter portion of `README.md` that was
+present prior to a summary-first rewrite. It can be used to restore or
+reference the full original documentation.
 
 ----
-
-Original documentation (preserved)
----------------------------------
-
-The original latter portion of the README is preserved verbatim in
-`README_tail_backup.md`. It is included below for convenience.
-
-<!-- BEGIN PRESERVED TAIL -->
 
 GeoGebra.jl
 ===========
@@ -338,6 +286,4 @@ around widget lifecycle and environment-specific comm registration) and has
 not yet been addressed. Work on `Interact.jl` compatibility is planned but
 outstanding.
 
-<!-- END PRESERVED TAIL -->
-
-
+----
