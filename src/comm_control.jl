@@ -56,7 +56,7 @@ function get_kernel_id()
     if hasproperty(k, :connection_file)
         cf = k.connection_file
         if isa(cf, String)
-            m = match(r"kernel-(.*)\\.json", cf)
+            m = match(r"kernel-(.*)\.json", cf)
             if m !== nothing
                 return m.captures[1]
             end

@@ -31,6 +31,7 @@ println(resp)
 
 """
 
+using UUIDs
 using JSON
 using PythonCall
 
@@ -68,6 +69,104 @@ end
 function disable_direct_transport!()
     CommBridge.set_request_handler!(p -> CommBridge.request_tcp(p))
     return nothing
+end
+
+# Install a default auto-switching request handler that prefers the kernel-side
+# direct comm transport when a comm is registered, but falls back to the TCP
+# bridge if no direct comm is available or if sending via comm fails.
+function _auto_request_handler(payload)
+    keys = list_registered_comm_keys()
+    if isempty(keys)
+        throw(ErrorException("comm_direct: no registered comm connections"))
+    end
+    k = keys[1]
+    # Send via kernel-side comm, then dequeue the next inbound message for
+    # this comm. Frontend enqueues stringified JSON messages, so we parse
+    # the string into a Dict and normalize the reply payload to match
+    # comm_bridge semantics. This performs a timed poll (up to
+    # `COMM_REPLY_TIMEOUT`) on the comm queue.
+    # Send and wait for the reply that contains the matching `req_id`.
+    # `send_and_wait_for_id` ensures requests are paired with replies even
+    # if multiple requests are in-flight concurrently.
+    resp = send_and_wait_for_id(k, payload; timeout=COMM_REPLY_TIMEOUT)
+    println("[comm_direct] received reply for key:", k, " at ", time(), " response: ", resp)
+    # If the queued message is a JSON string, parse it to Dict
+    if isa(resp, AbstractString)
+        try
+            parsed = JSON.parse(resp)
+            resp = parsed
+        catch
+            # leave resp as string if parse fails
+        end
+    end
+    # Normalize response: unwrap {"reply":...} or {"type":"created","payload":...}
+    if isa(resp, AbstractDict)
+        if haskey(resp, "reply")
+            return resp["reply"]
+        elseif haskey(resp, "type") && string(resp["type"]) == "created" && haskey(resp, "payload")
+            return resp["payload"]
+        elseif haskey(resp, "payload")
+            return resp["payload"]
+        end
+    end
+    return resp
+end
+
+# Revert to TCP bridge transport by default. Direct comm transport can
+# be enabled explicitly via `enable_direct_transport!()` when desired.
+disable_direct_transport!()
+
+# Install an asynchronous comm receive handler that updates the local
+# construction protocol when the frontend notifies about created objects
+# or returns payloads. This avoids blocking the kernel waiting for replies
+# and matches the comm_bridge semantics where messages are delivered
+# asynchronously via the comm target callbacks.
+function _comm_direct_receive_handler(conn, data)
+    try
+        d = data
+        # if string, try to parse
+        if isa(d, AbstractString)
+            try
+                d = JSON.parse(d)
+            catch
+                # leave as string
+            end
+        end
+        # If the incoming data is a Dict with a created event, push to protocol
+        if isa(d, AbstractDict)
+            ty = get(d, "type", nothing)
+            if ty !== nothing && string(ty) == "created"
+                payload = get(d, "payload", nothing)
+                label = nothing
+                if isa(payload, AbstractDict) && haskey(payload, "label")
+                    label = string(payload["label"])
+                else
+                    # synthesize a label based on protocol length
+                    label = "obj$(length(_CONSRUCTION_PROTOCOL[]) + 1)"
+                end
+                push!(_CONSRUCTION_PROTOCOL[], GGBObject(label, payload))
+                return nothing
+            end
+            # also accept direct reply wrappers
+            if haskey(d, "reply") || haskey(d, "payload")
+                pl = get(d, "reply", get(d, "payload", d))
+                label = "obj$(length(_CONSRUCTION_PROTOCOL[]) + 1)"
+                push!(_CONSRUCTION_PROTOCOL[], GGBObject(label, pl))
+                return nothing
+            end
+        end
+        # For messages without dicts or recognized fields, append raw data
+        push!(_CONSRUCTION_PROTOCOL[], GGBObject("obj$(length(_CONSRUCTION_PROTOCOL[]) + 1)", d))
+    catch err
+        @warn "_comm_direct_receive_handler failed" err=err
+    end
+    return nothing
+end
+
+try
+    set_comm_receive_handler!(_comm_direct_receive_handler)
+catch err
+    @warn "Failed to set comm receive handler" err=err
 end
 
 # NOTE: Prefer explicit `pyimport("ggblab.comm_bridge").connect()` or
