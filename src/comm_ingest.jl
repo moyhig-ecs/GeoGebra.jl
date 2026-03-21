@@ -236,17 +236,33 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing, websocket::B
                             # WebSocket frame loop (simple implementation: handle text frames, masked client frames)
                             while isopen(c)
                                 # read first two bytes
-                                b1 = try read(c, UInt8) catch break end
-                                b2 = try read(c, UInt8) catch break end
+                                b1 = try
+                                    read(c, UInt8)
+                                catch e
+                                    break
+                                end
+                                b2 = try
+                                    read(c, UInt8)
+                                catch e
+                                    break
+                                end
                                 fin = (b1 & 0x80) != 0
                                 opcode = b1 & 0x0f
                                 masked = (b2 & 0x80) != 0
                                 payload_len = Int(b2 & 0x7f)
                                 if payload_len == 126
-                                    ext = read(c, UInt8, 2)
+                                    ext = try
+                                        read(c, UInt8, 2)
+                                    catch e
+                                        break
+                                    end
                                     payload_len = Int(UInt16(ext[1]) << 8 | UInt16(ext[2]))
                                 elseif payload_len == 127
-                                    ext = read(c, UInt8, 8)
+                                    ext = try
+                                        read(c, UInt8, 8)
+                                    catch e
+                                        break
+                                    end
                                     payload_len = 0
                                     for i in 1:8
                                         payload_len = (payload_len << 8) | Int(ext[i])
@@ -254,9 +270,20 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing, websocket::B
                                 end
                                 mask_key = UInt8[]
                                 if masked
-                                    mask_key = read(c, UInt8, 4)
+                                    mask_key = try
+                                        read(c, UInt8, 4)
+                                    catch e
+                                        break
+                                    end
                                 end
-                                payload = payload_len > 0 ? read(c, UInt8, payload_len) : UInt8[]
+                                payload = UInt8[]
+                                if payload_len > 0
+                                    payload = try
+                                        read(c, UInt8, payload_len)
+                                    catch e
+                                        break
+                                    end
+                                end
                                 if masked && payload_len > 0
                                     for i in 1:payload_len
                                         payload[i] = payload[i] ⊻ mask_key[(i-1) % 4 + 1]
