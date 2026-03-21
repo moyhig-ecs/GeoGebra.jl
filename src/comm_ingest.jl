@@ -24,6 +24,12 @@ using UUIDs
 
 export start_ingest_server, stop_ingest_server
 
+# Single-channel serialized handler: ensures receive handler runs synchronously
+# (processed sequentially by a single worker task) rather than concurrently
+# from multiple connection tasks.
+const INGEST_HANDLER_CHANNEL = Channel{Tuple{Any,Any}}(1024)
+const INGEST_HANDLER_TASK = Ref{Union{Task,Nothing}}(nothing)
+
 function _reserve_socket_path(prefix::AbstractString="/tmp/ggb_")
     # Generate candidate paths and ensure they are actually free by trying
     # to bind a temporary UNIX-domain listener. If bind succeeds we close
@@ -126,6 +132,26 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing)
     end
 
     println("[comm_ingest] listening on: $path")
+    # Start (or reuse) the serialized handler worker
+    if INGEST_HANDLER_TASK[] === nothing || (INGEST_HANDLER_TASK[] !== nothing && istaskdone(INGEST_HANDLER_TASK[]))
+        INGEST_HANDLER_TASK[] = @async begin
+            while true
+                tup = try
+                    take!(INGEST_HANDLER_CHANNEL)
+                catch
+                    break
+                end
+                conn, parsed = tup
+                try
+                    COMM_RECEIVE_HANDLER[](conn, parsed)
+                catch err_h
+                    @warn "comm_ingest: serialized handler raised" err=err_h
+                end
+            end
+        end
+        println("[comm_ingest] started serialized handler task: ", INGEST_HANDLER_TASK[])
+    end
+
     task = @async begin
         try
             while isopen(server)
@@ -140,7 +166,7 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing)
                         continue
                     end
                 end
-                @async begin
+                begin
                     # capture client into a local variable for closure safety
                     c = client
                     try
@@ -187,10 +213,10 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing)
                                 println("[comm_ingest] no registered connection for key=", k)
                             else
                                 try
-                                    println("[comm_ingest] invoking COMM_RECEIVE_HANDLER for key=", k)
-                                    COMM_RECEIVE_HANDLER[](conn, parsed)
+                                    println("[comm_ingest] enqueue handler -> key=", k)
+                                    put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
                                 catch err_inner
-                                    @warn "comm_ingest: receive handler failed" err=err_inner
+                                    @warn "comm_ingest: failed to enqueue serialized handler" err=err_inner
                                 end
                             end
                         end
@@ -223,6 +249,15 @@ function stop_ingest_server(path::String, t::Task)
         schedule(t, () -> nothing)
         # Best-effort cancel
         Base.throwto(t, InterruptException())
+        # Also cancel serialized handler task if present
+        try
+            if INGEST_HANDLER_TASK[] !== nothing
+                Base.throwto(INGEST_HANDLER_TASK[] , InterruptException())
+                INGEST_HANDLER_TASK[] = nothing
+            end
+        catch err_h
+            @warn "comm_ingest: failed to cancel handler task" err=err_h
+        end
     catch err
         @warn "comm_ingest: failed to cancel task" err=err
     end
