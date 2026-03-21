@@ -23,11 +23,12 @@ using JSON
 using UUIDs
 using SHA
 using Base64
-try
+const HTTP_AVAILABLE = try
     @eval using HTTP
     @eval using HTTP.WebSockets
+    true
 catch
-    # HTTP not available; websocket option will error if used
+    false
 end
 
 export start_ingest_server, stop_ingest_server
