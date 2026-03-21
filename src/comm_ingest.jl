@@ -165,6 +165,22 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing, websocket::B
         # Use HTTP.WebSockets.listen! for robust websocket-over-UDS handling
         task = @async begin
             try
+                # HTTP.WebSockets.listen! expects a stream type it can handle (TCP/HTTP Stream).
+                # If we have a Sockets.PipeServer (returned by Sockets.listen on some platforms),
+                # try to recreate the listener via UnixSockets which HTTP can accept.
+                if !HTTP_AVAILABLE
+                    throw(ErrorException("comm_ingest: HTTP.WebSockets not available in this environment; install HTTP.jl"))
+                end
+                if typeof(server) <: Sockets.PipeServer
+                    try
+                        @eval using UnixSockets
+                        try close(server) catch end
+                        server = UnixSockets.listen(path)
+                    catch err_unix
+                        throw(ErrorException("comm_ingest: HTTP.WebSockets.listen! cannot operate on Sockets.PipeServer; install UnixSockets.jl or start with websocket=false. underlying: $err_unix"))
+                    end
+                end
+
                 HTTP.WebSockets.listen!(server) do ws
                     println("[comm_ingest] ws client connected")
                     try
