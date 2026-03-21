@@ -155,6 +155,7 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing)
     task = @async begin
         try
             while isopen(server)
+                client = nothing
                 try
                     client = accept(server)
                     println("[comm_ingest] accepted connection")
