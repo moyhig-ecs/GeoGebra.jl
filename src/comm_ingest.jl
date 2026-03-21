@@ -23,6 +23,12 @@ using JSON
 using UUIDs
 using SHA
 using Base64
+try
+    @eval using HTTP
+    @eval using HTTP.WebSockets
+catch
+    # HTTP not available; websocket option will error if used
+end
 
 export start_ingest_server, stop_ingest_server
 
@@ -154,191 +160,17 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing, websocket::B
         println("[comm_ingest] started serialized handler task: ", INGEST_HANDLER_TASK[])
     end
 
-    task = @async begin
-        try
-            while isopen(server)
-                client = nothing
-                try
-                    client = accept(server)
-                    println("[comm_ingest] accepted connection")
-                catch e
-                    if isa(e, EOFError) || isa(e, Base.IOError)
-                        break
-                    else
-                        @warn "comm_ingest: accept failed" err=e
-                        continue
-                    end
-                end
-                begin
-                    # capture client into a local variable for closure safety
-                    c = client
+    if websocket
+        # Use HTTP.WebSockets.listen! for robust websocket-over-UDS handling
+        task = @async begin
+            try
+                HTTP.WebSockets.listen!(server) do ws
+                    println("[comm_ingest] ws client connected")
                     try
-                        # Read the first lines to detect an HTTP/WebSocket handshake
-                        # Accumulate header lines until an empty line (CRLF) is seen.
-                        first = true
-                        headers = String[]
-                        while isopen(c) && !eof(c)
-                            line = try
-                                readline(c)
-                            catch
-                                break
-                            end
-                            # stop header accumulation at empty line
-                            if isempty(line)
-                                break
-                            end
-                            push!(headers, line)
-                            # For non-handshake simple messages (no HTTP GET), break after first line
-                            if first && !(startswith(headers[1], "GET ") || occursin("Upgrade: websocket", lowercase(line)))
-                                break
-                            end
-                            first = false
-                        end
-
-                        # If this looks like a WebSocket handshake (HTTP GET + Upgrade), perform handshake
-                        is_handshake = false
-                        if !isempty(headers)
-                            if startswith(headers[1], "GET ") || any(h -> occursin("upgrade: websocket", lowercase(h)), headers)
-                                is_handshake = true
-                            end
-                        end
-
-                        if is_handshake || websocket
-                            # parse Sec-WebSocket-Key
-                            key = nothing
-                            for h in headers
-                                parts = split(h, ':', limit=2)
-                                if length(parts) == 2
-                                    name = lowercase(strip(parts[1])); val = strip(parts[2])
-                                    if name == "sec-websocket-key"
-                                        key = val
-                                        break
-                                    end
-                                end
-                            end
-                            if key === nothing
-                                @warn "comm_ingest: websocket handshake missing Sec-WebSocket-Key"
-                                try close(c) catch end
-                                continue
-                            end
-                            accept_key = Base64.base64encode(sha1(key * "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
-                            # send handshake response
-                            resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: $accept_key\r\n\r\n"
+                        for msg in ws
                             try
-                                write(c, resp)
-                                flush(c)
-                            catch err_w
-                                @warn "comm_ingest: failed to write websocket handshake response" err=err_w
-                                try close(c) catch end
-                                continue
-                            end
-
-                            # WebSocket frame loop (simple implementation: handle text frames, masked client frames)
-                            while isopen(c)
-                                # read first two bytes
-                                b1 = try
-                                    read(c, UInt8)
-                                catch e
-                                    break
-                                end
-                                b2 = try
-                                    read(c, UInt8)
-                                catch e
-                                    break
-                                end
-                                fin = (b1 & 0x80) != 0
-                                opcode = b1 & 0x0f
-                                masked = (b2 & 0x80) != 0
-                                payload_len = Int(b2 & 0x7f)
-                                if payload_len == 126
-                                    ext = try
-                                        read(c, UInt8, 2)
-                                    catch e
-                                        break
-                                    end
-                                    payload_len = Int(UInt16(ext[1]) << 8 | UInt16(ext[2]))
-                                elseif payload_len == 127
-                                    ext = try
-                                        read(c, UInt8, 8)
-                                    catch e
-                                        break
-                                    end
-                                    payload_len = 0
-                                    for i in 1:8
-                                        payload_len = (payload_len << 8) | Int(ext[i])
-                                    end
-                                end
-                                mask_key = UInt8[]
-                                if masked
-                                    mask_key = try
-                                        read(c, UInt8, 4)
-                                    catch e
-                                        break
-                                    end
-                                end
-                                payload = UInt8[]
-                                if payload_len > 0
-                                    payload = try
-                                        read(c, UInt8, payload_len)
-                                    catch e
-                                        break
-                                    end
-                                end
-                                if masked && payload_len > 0
-                                    for i in 1:payload_len
-                                        payload[i] = payload[i] ⊻ mask_key[(i-1) % 4 + 1]
-                                    end
-                                end
-                                if opcode == 0x8
-                                    # close frame
-                                    break
-                                elseif opcode == 0x1 || opcode == 0x2 || opcode == 0x0
-                                    # text (1) / binary (2) / continuation (0)
-                                    msg = try String(payload) catch
-                                        String(copy(payload))
-                                    end
-                                    if isempty(msg)
-                                        continue
-                                    end
-                                    println("[comm_ingest] ws received: ", msg)
-                                    parsed = try JSON.parse(msg) catch msg end
-
-                                    # route as before
-                                    k = nothing
-                                    if isa(parsed, AbstractDict)
-                                        if haskey(parsed, "comm_key")
-                                            k = string(parsed["comm_key"])
-                                        elseif haskey(parsed, "key")
-                                            k = string(parsed["key"])
-                                        elseif haskey(parsed, "kernelId")
-                                            k = string(parsed["kernelId"])
-                                        end
-                                    end
-                                    if k === nothing
-                                        ks = list_registered_comm_keys()
-                                        if isempty(ks)
-                                            @warn "comm_ingest: no registered comms to route message to"
-                                            continue
-                                        end
-                                        k = ks[1]
-                                    end
-                                    s = try isa(parsed, AbstractString) ? parsed : JSON.json(parsed) catch; string(parsed) end
-                                    _enqueue_comm_message(k, s)
-                                    conn = get_registered_connection(k)
-                                    if conn !== nothing
-                                        try put!(INGEST_HANDLER_CHANNEL, (conn, parsed)) catch err_inner @warn "comm_ingest: failed to enqueue serialized handler" err=err_inner end
-                                    end
-                                else
-                                    # ignore other opcodes (ping/pong handled lightly)
-                                end
-                            end
-                        else
-                            # Non-websocket simple single-line messages: process the already-read first line
-                            if !isempty(headers)
-                                line = headers[1]
-                                println("[comm_ingest] received raw: ", line)
-                                parsed = try JSON.parse(line) catch line end
-                                println("[comm_ingest] parsed: ", isa(parsed, AbstractString) ? parsed : JSON.json(parsed))
+                                println("[comm_ingest] ws received: ", msg)
+                                parsed = try JSON.parse(msg) catch msg end
                                 k = nothing
                                 if isa(parsed, AbstractDict)
                                     if haskey(parsed, "comm_key")
@@ -353,43 +185,121 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing, websocket::B
                                     ks = list_registered_comm_keys()
                                     if isempty(ks)
                                         @warn "comm_ingest: no registered comms to route message to"
-                                    else
-                                        k = ks[1]
-                                        s = try isa(parsed, AbstractString) ? parsed : JSON.json(parsed) catch; string(parsed) end
-                                        println("[comm_ingest] enqueue -> key=", k)
-                                        _enqueue_comm_message(k, s)
-                                        conn = get_registered_connection(k)
-                                        if conn === nothing
-                                            println("[comm_ingest] no registered connection for key=", k)
-                                        else
-                                            try
-                                                println("[comm_ingest] enqueue handler -> key=", k)
-                                                put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
-                                            catch err_inner
-                                                @warn "comm_ingest: failed to enqueue serialized handler" err=err_inner
-                                            end
-                                        end
+                                        continue
+                                    end
+                                    k = ks[1]
+                                end
+                                s = try isa(parsed, AbstractString) ? parsed : JSON.json(parsed) catch; string(parsed) end
+                                _enqueue_comm_message(k, s)
+                                conn = get_registered_connection(k)
+                                if conn !== nothing
+                                    put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
+                                end
+                            catch err_msg
+                                @warn "comm_ingest: websocket message handler error" err=err_msg
+                            end
+                        end
+                    catch err_ws
+                        @warn "comm_ingest: websocket connection failed" err=err_ws
+                    finally
+                        try close(ws) catch end
+                    end
+                end
+            catch err
+                @warn "comm_ingest: websocket listener terminated" err=err
+            finally
+                try close(server) catch end
+                try ispath(path) && rm(path) catch end
+            end
+        end
+    else
+        task = @async begin
+            try
+                while isopen(server)
+                    client = nothing
+                    try
+                        client = accept(server)
+                        println("[comm_ingest] accepted connection")
+                    catch e
+                        if isa(e, EOFError) || isa(e, Base.IOError)
+                            break
+                        else
+                            @warn "comm_ingest: accept failed" err=e
+                            continue
+                        end
+                    end
+                    begin
+                        # capture client into a local variable for closure safety
+                        c = client
+                        try
+                            while isopen(c) && !eof(c)
+                                line = try
+                                    readline(c)
+                                catch
+                                    break
+                                end
+                                isempty(line) && continue
+                                println("[comm_ingest] received raw: ", line)
+                                parsed = try
+                                    JSON.parse(line)
+                                catch
+                                    line
+                                end
+                                println("[comm_ingest] parsed: ", isa(parsed, AbstractString) ? parsed : JSON.json(parsed))
+
+                                # Route message to a comm key (comm_key/key/kernelId) or default
+                                k = nothing
+                                if isa(parsed, AbstractDict)
+                                    if haskey(parsed, "comm_key")
+                                        k = string(parsed["comm_key"])
+                                    elseif haskey(parsed, "key")
+                                        k = string(parsed["key"])
+                                    elseif haskey(parsed, "kernelId")
+                                        k = string(parsed["kernelId"])
+                                    end
+                                end
+                                if k === nothing
+                                    ks = list_registered_comm_keys()
+                                    if isempty(ks)
+                                        @warn "comm_ingest: no registered comms to route message to"
+                                        continue
+                                    end
+                                    k = ks[1]
+                                end
+
+                                s = try isa(parsed, AbstractString) ? parsed : JSON.json(parsed) catch; string(parsed) end
+                                println("[comm_ingest] enqueue -> key=", k)
+                                _enqueue_comm_message(k, s)
+                                conn = get_registered_connection(k)
+                                if conn === nothing
+                                    println("[comm_ingest] no registered connection for key=", k)
+                                else
+                                    try
+                                        println("[comm_ingest] enqueue handler -> key=", k)
+                                        put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
+                                    catch err_inner
+                                        @warn "comm_ingest: failed to enqueue serialized handler" err=err_inner
                                     end
                                 end
                             end
-                        end
-                    catch err_client
-                        @warn "comm_ingest: client handler failed" err=err_client
-                    finally
-                        try
-                            if c !== nothing && isopen(c)
-                                close(c)
+                        catch err_client
+                            @warn "comm_ingest: client handler failed" err=err_client
+                        finally
+                            try
+                                if c !== nothing && isopen(c)
+                                    close(c)
+                                end
+                            catch
                             end
-                        catch
                         end
                     end
                 end
+            catch err
+                @warn "comm_ingest: accept loop terminated" err=err
+            finally
+                try close(server) catch end
+                try ispath(path) && rm(path) catch end
             end
-        catch err
-            @warn "comm_ingest: accept loop terminated" err=err
-        finally
-            try close(server) catch end
-            try ispath(path) && rm(path) catch end
         end
     end
 
