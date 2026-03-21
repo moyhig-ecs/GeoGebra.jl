@@ -239,7 +239,12 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing, websocket::B
                                     break
                                 end
                                 isempty(line) && continue
-                                println("[comm_ingest] received raw: ", line)
+                                    # If these headers indicate an HTTP/WebSocket handshake
+                                    if startswith(line, "GET ") || occursin("upgrade: websocket", lowercase(line))
+                                        println("[comm_ingest] detected websocket handshake but server not started with websocket=true; closing connection")
+                                        continue
+                                    end
+                                    println("[comm_ingest] received raw: ", line)
                                 parsed = try
                                     JSON.parse(line)
                                 catch
