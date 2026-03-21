@@ -42,8 +42,10 @@ DEFAULT_PORT = 8765
 # Include comm bridge and transport switching helpers now that defaults exist
 include("comm_bridge.jl")
 using .CommBridge
-include("comm_control.jl")
 include("comm_direct.jl")
+include("comm_ingest.jl")
+include("comm_inget_ws.jl")
+include("comm_control.jl")
 
 export CommBridge
 
@@ -114,7 +116,9 @@ end
 
 # Revert to TCP bridge transport by default. Direct comm transport can
 # be enabled explicitly via `enable_direct_transport!()` when desired.
-disable_direct_transport!()
+# Commented out to prefer the kernel-side direct comm transport by default.
+# disable_direct_transport!()
+enable_direct_transport!()
 
 # Install an asynchronous comm receive handler that updates the local
 # construction protocol when the frontend notifies about created objects
