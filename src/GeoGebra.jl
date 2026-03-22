@@ -44,7 +44,7 @@ include("comm_bridge.jl")
 using .CommBridge
 include("comm_direct.jl")
 include("comm_ingest.jl")
-include("comm_inget_ws.jl")
+include("comm_ingest_ws.jl")
 include("comm_control.jl")
 
 export CommBridge

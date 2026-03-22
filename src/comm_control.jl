@@ -68,7 +68,7 @@ function inject_applet(; insertMode::String="split-right", appName::String="suit
         ingest_path = socketPath === nothing ? nothing : socketPath
     end
 
-    payload = Dict("type"=>"inject", "kernelId"=>k, "insertMode"=>insertMode, "appName"=>appName)
+    payload = Dict{String,Any}("type"=>"inject", "kernelId"=>k, "insertMode"=>insertMode, "appName"=>appName)
     if ingest_port !== nothing
         payload["wsPort"] = ingest_port
     elseif ingest_path !== nothing
