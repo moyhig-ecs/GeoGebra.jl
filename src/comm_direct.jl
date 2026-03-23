@@ -43,12 +43,13 @@ Notes:
 using IJulia
 using Sockets
 using JSON
+using Observables
 using UUIDs
 
 export AbstractConnection, IJuliaConnection, set_comm_receive_handler!, send_via_connection,
-       list_registered_comm_keys, get_registered_connection, send_via_key, unregister_comm!
-
-export send_and_wait_for_next, send_and_wait_for_id
+       list_registered_comm_keys, get_registered_connection, send_via_key, unregister_comm!,
+       get_object_observable, add_object_handler, remove_object_observable, remove_object_handler,
+       send_and_wait_for_next, send_and_wait_for_id
 
 abstract type AbstractConnection end
 
@@ -76,6 +77,9 @@ const COMM_QUEUES = Dict{String, Channel{String}}()
 const PENDING_REPLIES = Dict{String, Channel{Any}}()
 # Observer queues for downstream consumers (only object_update messages)
 const OBSERVER_QUEUES = Dict{String, Channel{String}}()
+# Per-object Observables keyed by object name (e.g. payload.name in object_update)
+const OBJECT_OBSERVABLES = Dict{String, Observable{Any}}()
+# (No internal handler registry; rely on Observables.off and OBJECT_OBSERVABLES)
 # Recently-seen reply ids per-comm to ignore duplicates
 const SEEN_REPLIES = Dict{String, Set{String}}()
 # Default timeout (seconds) to wait for a reply from the frontend via comm
@@ -147,7 +151,25 @@ function _enqueue_comm_message(key::String, data::String)
                     try
                         if isa(item, AbstractDict) && get(item, "type", "") == "object_update"
                             q = _ensure_observer_queue(key)
-                            put!(q, s_item)
+                                @async try
+                                    put!(q, s_item)
+                                catch err_put_async
+                                    @warn "comm_direct: async put to observer failed" err=err_put_async
+                                end
+                            # update/create object observable for payload.name -> payload.value
+                            try
+                                pl = get(item, "payload", nothing)
+                                if isa(pl, AbstractDict) && haskey(pl, "name")
+                                    nm = string(pl["name"])
+                                    val = get(pl, "value", nothing)
+                                    obs = get_object_observable(nm)
+                                    try
+                                        obs[] = val
+                                    catch
+                                    end
+                                end
+                            catch
+                            end
                             continue
                         end
                     catch err_obs
@@ -201,7 +223,25 @@ function _enqueue_comm_message(key::String, data::String)
             try
                 if get(parsed, "type", "") == "object_update"
                     q = _ensure_observer_queue(key)
-                    put!(q, JSON.json(parsed))
+                        @async try
+                            put!(q, JSON.json(parsed))
+                        catch err_put_async
+                            @warn "comm_direct: async enqueue object_update failed" err=err_put_async
+                        end
+                    # update/create object observable for payload.name -> payload.value
+                    try
+                        pl = get(parsed, "payload", nothing)
+                        if isa(pl, AbstractDict) && haskey(pl, "name")
+                            nm = string(pl["name"])
+                            val = get(pl, "value", nothing)
+                            obs = get_object_observable(nm)
+                            try
+                                obs[] = val
+                            catch
+                            end
+                        end
+                    catch
+                    end
                     @debug "comm_direct: forwarded object_update to observer" key=key
                     return nothing
                 end
@@ -214,7 +254,11 @@ function _enqueue_comm_message(key::String, data::String)
         try
             @debug "comm_direct: enqueued message" key=key time=time()
             @debug "comm_direct: comm_queue" queue=COMM_QUEUES[key]
-            put!(ch, data)
+                @async try
+                    put!(ch, data)
+                catch err_put_async
+                    @warn "comm_direct: async enqueue message failed" err=err_put_async
+                end
         catch err
             @debug "comm_direct: failed to enqueue message" key=key time=time()
             # ignore if channel put fails
@@ -471,6 +515,91 @@ function _ensure_observer_queue(key::String)
     return OBSERVER_QUEUES[key]
 end
 
+
+### Object observables API (name-based observables for `object_update` messages)
+function get_object_observable(name::AbstractString)
+    key = string(name)
+    if !haskey(OBJECT_OBSERVABLES, key)
+        OBJECT_OBSERVABLES[key] = Observable{Any}(nothing)
+    end
+    return OBJECT_OBSERVABLES[key]
+end
+
+function add_object_handler(name::AbstractString, fn::Function)
+    obs = get_object_observable(name)
+    # register the raw handler directly; keep it simple
+    # Capture and return the ObserverFunction that `on` creates so callers
+    # can pass that observer to `remove_object_handler`.
+    obs_fn = on(obs) do v
+        try
+            fn(v)
+        catch e
+            @error "object handler error for $(name): $e"
+        end
+    end
+
+    return obs_fn
+end
+
+function remove_object_observable(name::AbstractString)
+    key = string(name)
+    # No internal registry to clean; callers should remove handlers explicitly
+    if haskey(OBJECT_OBSERVABLES, key)
+        delete!(OBJECT_OBSERVABLES, key)
+    end
+    return nothing
+end
+
+function remove_object_handler(name::AbstractString, handler::ObserverFunction)
+    key = string(name)
+    removed = false
+    # If we have an observable for this name, call Observables.off(obs, handler).
+    if haskey(OBJECT_OBSERVABLES, key)
+        obs = OBJECT_OBSERVABLES[key]
+        try
+            Observables.off(obs, handler)
+            removed = true
+        catch
+            # ignore errors from Observables.off
+        end
+    end
+
+    return removed
+end
+
+# `list_object_handlers` removed — no internal registry maintained.
+
+"""Remove a handler function from all object observables and internal registry.
+   Returns true if any removal occurred, false otherwise.
+"""
+function remove_object_handler(handler::ObserverFunction)
+    removed = false
+
+    # Try the Observables API that removes a handler globally (if available)
+    try
+        Observables.off(handler)
+        removed = true
+    catch
+        # ignore
+    end
+
+    # Also try per-observable removal
+    for (name, obs) in OBJECT_OBSERVABLES
+        try
+            Observables.off(obs, handler)
+            removed = true
+        catch
+        end
+    end
+
+    # No internal registry to clean up.
+
+    return removed
+end
+
+# `remove_object_handler_index` removed — use `remove_object_handler(name, handler)`
+# or `list_object_handlers(name)` + `remove_object_handler(name, handler)` instead.
+
 function _scan_comm_queue_for_reqid(key::String, rid::String)
     # Drain available messages from the comm queue, look for a message
     # whose req_id matches `rid`. Unpack bulk_actions and forward
@@ -513,6 +642,20 @@ function _scan_comm_queue_for_reqid(key::String, rid::String)
                             if isa(item, AbstractDict) && get(item, "type", "") == "object_update"
                                 q = _ensure_observer_queue(key)
                                 put!(q, JSON.json(item))
+                                # update/create object observable
+                                try
+                                    pl = get(item, "payload", nothing)
+                                    if isa(pl, AbstractDict) && haskey(pl, "name")
+                                        nm = string(pl["name"])
+                                        val = get(pl, "value", nothing)
+                                        obs = get_object_observable(nm)
+                                        try
+                                            obs[] = val
+                                        catch
+                                        end
+                                    end
+                                catch
+                                end
                             end
                         catch err_item
                             @warn "comm_direct: error handling bulk_actions item" err=err_item
@@ -540,6 +683,20 @@ function _scan_comm_queue_for_reqid(key::String, rid::String)
                 if !handled && get(parsed, "type", "") == "object_update"
                     q = _ensure_observer_queue(key)
                     put!(q, JSON.json(parsed))
+                    # update/create object observable
+                    try
+                        pl = get(parsed, "payload", nothing)
+                        if isa(pl, AbstractDict) && haskey(pl, "name")
+                            nm = string(pl["name"])
+                            val = get(pl, "value", nothing)
+                            obs = get_object_observable(nm)
+                            try
+                                obs[] = val
+                            catch
+                            end
+                        end
+                    catch
+                    end
                     handled = true
                 end
             end
