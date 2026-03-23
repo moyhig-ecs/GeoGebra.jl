@@ -140,10 +140,10 @@ uuid = "de31a74c-ac4f-5751-b3fd-e18cd04993ca"
 version = "0.5.0"
 
 [[deps.GeoGebra]]
-deps = ["Base64", "HTTP", "IJulia", "JSExpr", "JSON", "Observables", "PythonCall", "SHA", "Sockets", "SymPyPythonCall", "UUIDs", "WebIO"]
+deps = ["Base64", "HTTP", "IJulia", "JSExpr", "JSON", "Logging", "Observables", "PythonCall", "SHA", "Sockets", "SymPyPythonCall", "UUIDs", "WebIO"]
 path = "."
 uuid = "db4dc2ca-38af-41b7-ab88-76237475b77d"
-version = "0.1.2"
+version = "0.1.3"
 
 [[deps.Ghostscript_jll]]
 deps = ["Artifacts", "JLLWrappers", "JpegTurbo_jll", "Libdl", "Zlib_jll"]
