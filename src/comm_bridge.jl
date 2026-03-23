@@ -3,6 +3,23 @@ module CommBridge
 using JSON
 # using PythonCall
 
+# Helper: safely detect GeoGebra.GGBObject type when this submodule is
+# included before the parent `GeoGebra` module defines it. Avoids
+# UndefVarError when looking up `GeoGebra` from inside `CommBridge`.
+function _is_ggbobject(a)
+    try
+        if isdefined(Main, :GeoGebra)
+            ggb = getfield(Main, :GeoGebra)
+            if isdefined(ggb, :GGBObject)
+                return isa(a, getfield(ggb, :GGBObject))
+            end
+        end
+    catch
+        # fall through
+    end
+    return false
+end
+
 # Simple TCP JSON bridge client utilities extracted from backup.
 # These functions implement a TCP transport for the bridge and are
 # intentionally grouped in this submodule so other transport
@@ -81,7 +98,7 @@ function send_function_tcp(name, args...; host::String="127.0.0.1", port::Int=87
 end
 
 function send_command_eval_tcp(name, args_tuple)
-    args = Tuple((isa(a, GGBObject) ? a.label : a) for a in args_tuple)
+    args = Tuple((_is_ggbobject(a) ? a.label : a) for a in args_tuple)
     name_str = isa(name, Symbol) ? string(name) : string(name)
     arg_strs = [string(a) for a in args]
     cmd_text = string(name_str, "(", join(arg_strs, ", "), ")")
@@ -89,7 +106,7 @@ function send_command_eval_tcp(name, args_tuple)
 end
 
 function send_function_eval_tcp(name, args_tuple)
-    args = Tuple((isa(a, GGBObject) ? a.label : a) for a in args_tuple)
+    args = Tuple((_is_ggbobject(a) ? a.label : a) for a in args_tuple)
     return send_function_tcp(name, args...)
 end
 
@@ -143,7 +160,7 @@ function send_function(name, args...; host::String="127.0.0.1", port::Int=8765)
 end
 
 function send_command_eval(name, args_tuple; host::String="127.0.0.1", port::Int=8765)
-    args = Tuple((isa(a, GGBObject) ? a.label : a) for a in args_tuple)
+    args = Tuple((_is_ggbobject(a) ? a.label : a) for a in args_tuple)
     name_str = isa(name, Symbol) ? string(name) : string(name)
     arg_strs = [string(a) for a in args]
     cmd_text = string(name_str, "(", join(arg_strs, ", "), ")")
@@ -151,7 +168,7 @@ function send_command_eval(name, args_tuple; host::String="127.0.0.1", port::Int
 end
 
 function send_function_eval(name, args_tuple; host::String="127.0.0.1", port::Int=8765)
-    args = Tuple((isa(a, GGBObject) ? a.label : a) for a in args_tuple)
+    args = Tuple((_is_ggbobject(a) ? a.label : a) for a in args_tuple)
     return send_function(name, args...; host=host, port=port)
 end
 

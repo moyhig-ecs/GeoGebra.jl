@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "b4b361edf4f61fd1a7f3ed2b1adccaa50088a6d9"
+project_hash = "14744fff3c73b0ec01d8aba9003738620fa6874b"
 
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
@@ -140,7 +140,7 @@ uuid = "de31a74c-ac4f-5751-b3fd-e18cd04993ca"
 version = "0.5.0"
 
 [[deps.GeoGebra]]
-deps = ["Base64", "IJulia", "JSExpr", "JSON", "Observables", "PythonCall", "SHA", "Sockets", "SymPyPythonCall", "UUIDs", "WebIO"]
+deps = ["Base64", "HTTP", "IJulia", "JSExpr", "JSON", "Observables", "PythonCall", "SHA", "Sockets", "SymPyPythonCall", "UUIDs", "WebIO"]
 path = "."
 uuid = "db4dc2ca-38af-41b7-ab88-76237475b77d"
 version = "0.1.2"

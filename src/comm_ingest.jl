@@ -325,7 +325,8 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing, websocket::B
         end
     end
 
-    return (path, task)
+    # Return a named tuple so callers can access `.path` or destructure
+    return (path=path, task=task)
 end
 
 function stop_ingest_server(path::String, t::Task)

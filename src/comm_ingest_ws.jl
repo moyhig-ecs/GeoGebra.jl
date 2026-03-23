@@ -8,9 +8,12 @@ This file provides `start_ingest_ws_server(; port=nothing)` which returns
 `(port, task)` where `task` is the background Task running the server.
 """
 
+using Sockets
+using Sockets
 using HTTP
 using HTTP.WebSockets
 using JSON
+using Logging
 
 # Keep a reference to the background Task so it isn't garbage-collected.
 const INGEST_WS_TASK = Ref{Union{Task,Nothing}}(nothing)
@@ -19,13 +22,37 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
     # assume HTTP and HTTP.WebSockets are available (using above)
 
     host = "127.0.0.1"
-    p = port === nothing ? 8081 : Int(port)
+    if port === nothing
+        # find an ephemeral (free) port by binding to port 0 and then closing
+        function _find_free_port()
+            srv = nothing
+            try
+                srv = Sockets.listen(0)
+                a, p = Sockets.getsockname(srv)
+                return p
+            catch err
+                @warn "start_ingest_ws_server: failed to find free port, defaulting to 8081" err=err
+                return 8081
+            finally
+                try
+                    if srv !== nothing && isopen(srv)
+                        close(srv)
+                    end
+                catch
+                    @warn "start_ingest_ws_server: failed to close temporary socket" err=err
+                end
+            end
+        end
 
+        p = _find_free_port()
+        @debug "start_ingest_ws_server: auto-selected free port $p" host=host
+    else
+        p = Int(port)
+    end
+    @debug "start_ingest_ws_server: starting WebSocket server on port $p" host=host
     task = @async begin
         try
-            println("[comm_ingest_ws] Starting WebSocket server on ws://$(host):$(p)")
-
-            println("[comm_ingest_ws] Starting WebSocket server on ws://$(host):$(p)")
+            @debug "[comm_ingest_ws] Starting WebSocket server" host=host port=p
 
             # Use the simple pattern requested:
             # HTTP.listen(host, port) do http
@@ -38,15 +65,13 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
             # `HTTP.WebSockets.listen` and handle messages directly.
             # Direct WebSocket server using host/port (simple pattern)
             HTTP.WebSockets.listen(host, p) do ws
-                println("[comm_ingest_ws] Client connected")
+                @debug "[comm_ingest_ws] Client connected"
                 try
                     for msg in ws
                         # Echo back and forward into comm system
-                        try
-                            send(ws, msg)
-                        catch _
-                        end
-                        println("[comm_ingest_ws] Received: ", msg)
+                        send(ws, msg)
+
+                        @debug "[comm_ingest_ws] Received message" msg=msg
                         parsed = try JSON.parse(msg) catch msg end
                         k = nothing
                         if isa(parsed, AbstractDict)
@@ -74,7 +99,7 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
                         end
                     end
                 finally
-                    println("[comm_ingest_ws] Client disconnected")
+                    @debug "[comm_ingest_ws] Client disconnected"
                 end
             end
         catch err
@@ -83,6 +108,7 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
     end
 
     INGEST_WS_TASK[] = task
-    return (p, task)
+    # Return a named tuple so callers can access `.port` or destructure
+    return (port=p, task=task)
 end
 

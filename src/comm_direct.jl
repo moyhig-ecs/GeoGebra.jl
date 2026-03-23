@@ -64,7 +64,7 @@ from the frontend (string or parsed JSON). Users should call
 """
 const COMM_RECEIVE_HANDLER = Ref{Function}((conn, data) -> begin
     try
-        println("[comm_direct] received message:", isa(data, AbstractString) ? data : JSON.json(data))
+        @debug "comm_direct: received message" msg=(isa(data, AbstractString) ? data : JSON.json(data))
     catch err
         @warn "comm_direct: error printing incoming message" err=err
     end
@@ -83,8 +83,8 @@ const COMM_REPLY_TIMEOUT = 10.0
 # (No stored/pending reply state — inbound messages are delivered
 # asynchronously via `COMM_QUEUES` and `COMM_RECEIVE_HANDLER`.)
 function _enqueue_comm_message(key::String, data::String)
-    println("[comm_direct] enqueue attempt for key:", key, " at ", time())
-    println("[comm_direct] data to enqueue: ", data)
+    @debug "comm_direct: enqueue attempt" key=key time=time()
+    @debug "comm_direct: data to enqueue" data=data
     try
         # Ensure queue exists
         if !haskey(COMM_QUEUES, key)
@@ -161,7 +161,7 @@ function _enqueue_comm_message(key::String, data::String)
                         @warn "comm_direct: failed to enqueue bulk item" err=err_put2
                     end
                 end
-                println("[comm_direct] enqueued bulk_actions items for key:", key)
+                @debug "comm_direct: enqueued bulk_actions items" key=key
                 return nothing
             end
         end
@@ -202,7 +202,7 @@ function _enqueue_comm_message(key::String, data::String)
                 if get(parsed, "type", "") == "object_update"
                     q = _ensure_observer_queue(key)
                     put!(q, JSON.json(parsed))
-                    println("[comm_direct] forwarded object_update to observer for key:", key)
+                    @debug "comm_direct: forwarded object_update to observer" key=key
                     return nothing
                 end
             catch err_obs2
@@ -212,11 +212,11 @@ function _enqueue_comm_message(key::String, data::String)
 
         # Default: enqueue the raw string
         try
-            println("[comm_direct] enqueued message for key:", key, " at ", time())
-            println("[comm_direct] COMM_QUEUES[\"$key\"]: ", (COMM_QUEUES[key]))
+            @debug "comm_direct: enqueued message" key=key time=time()
+            @debug "comm_direct: comm_queue" queue=COMM_QUEUES[key]
             put!(ch, data)
         catch err
-            println("[comm_direct] failed to enqueue message for key:", key, " at ", time())
+            @debug "comm_direct: failed to enqueue message" key=key time=time()
             # ignore if channel put fails
         end
     catch err
@@ -232,13 +232,13 @@ function _dequeue_comm_message(key::String; timeout::Real=COMM_REPLY_TIMEOUT)
     end
     ch = COMM_QUEUES[key]
     t0 = time()
-    println("[comm_direct] dequeue wait start for key:", key, " at ", t0, " timeout=", timeout)
+    @debug "comm_direct: dequeue wait start" key=key start=t0 timeout=timeout
     while true
         if isready(ch)
-            println("[comm_direct] dequeue success for key:", key, " at ", time(), " waited ", time() - t0, "s")
+            @debug "comm_direct: dequeue success" key=key at=time() waited=(time() - t0)
             return take!(ch)
         elseif time() - t0 > timeout
-            println("[comm_direct] dequeue timeout for key:", key, " after ", time() - t0, "s")
+            @debug "comm_direct: dequeue timeout" key=key waited=(time() - t0)
             throw(ErrorException("comm_direct: timeout waiting for reply on comm $key"))
         else
             sleep(0.01)
@@ -252,7 +252,7 @@ function _wait_on_pending(id::String; timeout::Real=COMM_REPLY_TIMEOUT)
     end
     ch = PENDING_REPLIES[id]
     t0 = time()
-        @info "comm_direct: awaiting reply" req_id=id keys_pending=collect(keys(PENDING_REPLIES))
+        @debug "comm_direct: awaiting reply" req_id=id keys_pending=collect(keys(PENDING_REPLIES))
         while true
         # First, check whether the reply has already been enqueued in any
         # comm queue while the kernel was busy. If so, deliver it immediately.
@@ -375,7 +375,7 @@ function send_via_key(key::String, payload)
     # messages are enqueued and observers can read them asynchronously via
     # the per-comm queues. This mirrors a non-blocking transport similar to
     # the comm_bridge approach where replies are received independently.
-    println("[comm_direct] send_via_key sent (non-blocking) for key:", key)
+    @debug "comm_direct: send_via_key sent (non-blocking)" key=key
     return nothing
 end
 
@@ -645,9 +645,9 @@ on timeout.
 """
 function send_and_wait_for_next(key::String, payload; timeout::Real=COMM_REPLY_TIMEOUT)
     # send first
-    println("[comm_direct] send_and_wait_for_next sending for key:", key, " at ", time())
+    @debug "comm_direct: send_and_wait_for_next sending" key=key at=time()
     send_via_key(key, payload)
-    println("[comm_direct] send_and_wait_for_next sent for key:", key, " at ", time(), " now waiting for reply...")
+    @debug "comm_direct: send_and_wait_for_next sent, waiting for reply" key=key at=time()
     # start background task to dequeue (this task will block on channel but
     # not the caller's task scheduler)
     t = @async begin
@@ -722,7 +722,7 @@ function IJulia.CommManager.register_comm(comm::IJulia.CommManager.Comm{Symbol("
                         # nested replies (e.g. function results) are matched.
                         rid_any = _extract_reqid(parsed)
                         rid = rid_any === nothing ? nothing : string(rid_any)
-                        @info "comm_direct: incoming message with req_id" rid=rid keys_pending=collect(keys(PENDING_REPLIES))
+                        @debug "comm_direct: incoming message with req_id" rid=rid keys_pending=collect(keys(PENDING_REPLIES))
                         if rid !== nothing && haskey(PENDING_REPLIES, rid)
                             ch = PENDING_REPLIES[rid]
                             try

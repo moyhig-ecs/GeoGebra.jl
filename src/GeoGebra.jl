@@ -42,12 +42,15 @@ DEFAULT_PORT = 8765
 # Include comm bridge and transport switching helpers now that defaults exist
 include("comm_bridge.jl")
 using .CommBridge
+export CommBridge
+
+# Include IPython Comm implementation and control comm helpers
+# if Comm is available from IJulia; these are used for the preferred direct comm transport.
 include("comm_direct.jl")
 include("comm_ingest.jl")
 include("comm_ingest_ws.jl")
 include("comm_control.jl")
-
-export CommBridge
+export inject_applet, get_kernel_id
 
 # Transport helpers: allow switching CommBridge request handler to use the
 # kernel-side direct comm registered by `comm_direct.jl`. By default
@@ -85,7 +88,7 @@ function _auto_request_handler(payload)
     # `send_and_wait_for_id` ensures requests are paired with replies even
     # if multiple requests are in-flight concurrently.
     resp = send_and_wait_for_id(k, payload; timeout=COMM_REPLY_TIMEOUT)
-    println("[comm_direct] received reply for key:", k, " at ", time(), " response: ", resp)
+    # println("[comm_direct] received reply for key:", k, " at ", time(), " response: ", resp)
     # If the queued message is a JSON string, parse it to Dict
     if isa(resp, AbstractString)
         try
@@ -142,19 +145,19 @@ function _comm_direct_receive_handler(conn, data)
                     # synthesize a label based on protocol length
                     label = "obj$(length(_CONSRUCTION_PROTOCOL[]) + 1)"
                 end
-                push!(_CONSRUCTION_PROTOCOL[], GGBObject(label, payload))
+                @debug "_comm_direct_receive_handler: received created event" label=label
                 return nothing
             end
             # also accept direct reply wrappers
             if haskey(d, "reply") || haskey(d, "payload")
                 pl = get(d, "reply", get(d, "payload", d))
                 label = "obj$(length(_CONSRUCTION_PROTOCOL[]) + 1)"
-                push!(_CONSRUCTION_PROTOCOL[], GGBObject(label, pl))
+                @debug "_comm_direct_receive_handler: received reply/payload" payload=pl
                 return nothing
             end
         end
-        # For messages without dicts or recognized fields, append raw data
-        push!(_CONSRUCTION_PROTOCOL[], GGBObject("obj$(length(_CONSRUCTION_PROTOCOL[]) + 1)", d))
+        # For messages without dicts or recognized fields, log and ignore
+        @debug "_comm_direct_receive_handler: received unrecognized message" msg=d
     catch err
         @warn "_comm_direct_receive_handler failed" err=err
     end
