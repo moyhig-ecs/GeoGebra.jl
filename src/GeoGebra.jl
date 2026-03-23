@@ -959,6 +959,25 @@ macro ggblab(args...)
                                 end; nothing end))
             end
         end
+        # Support `@ggb :listen :O` shorthand: send a listen request and
+        # return the object's observable for downstream consumers.
+        if fstr_top !== nothing && lowercase(fstr_top) == "listen" && length(toks) >= 2
+            snd = toks[2]
+            lbl = _tok_to_str(snd)
+            if lbl === nothing
+                try
+                    lbl = string(snd)
+                catch
+                    lbl = nothing
+                end
+            end
+            if lbl !== nothing
+                return esc(:(begin
+                    GeoGebra.send_listen($(QuoteNode(lbl)); enabled=true)
+                    GeoGebra.get_object_observable($(QuoteNode(lbl)))
+                end))
+            end
+        end
         if first isa Expr && first.head == :vect
             # Handle array-literal form like @ggb["O"] where the macro sees
             # an Expr(:vect, elem...). If single-element and the element is a
