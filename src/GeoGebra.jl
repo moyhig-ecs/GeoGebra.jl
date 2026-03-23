@@ -54,17 +54,11 @@ export CommBridge
 # `CommBridge` uses the TCP bridge; call `enable_direct_transport!()` to
 # route requests via the first available registered comm connection.
 function enable_direct_transport!()
-    # handler uses first registered comm in comm_direct registry
-    function _direct_handler(payload)
-        keys = list_registered_comm_keys()
-        if isempty(keys)
-            throw(ErrorException("comm_direct: no registered comm connections"))
-        end
-        # use first registered connection
-        k = keys[1]
-        return send_via_key(k, payload)
-    end
-    CommBridge.set_request_handler!(_direct_handler)
+    # Prefer paired request/reply semantics when using direct comm transport.
+    # Use the module's `_auto_request_handler` which sends and waits for
+    # matching replies (via send_and_wait_for_id) so `send_command` behaves
+    # like the TCP bridge and returns replies synchronously.
+    CommBridge.set_request_handler!(_auto_request_handler)
     return nothing
 end
 
@@ -258,7 +252,19 @@ strings and sent inside the `payload` object:
 `{"type":"function","payload":{"name":...,"args":[...]}}`.
 """
 function send_function(name, args...; host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
-    return CommBridge.send_function(name, args...; host=host, port=port)
+    res = CommBridge.send_function(name, args...; host=host, port=port)
+    # If the result is a Julia vector and PythonCall is available, return
+    # a Python list for better interop with juliacall/Python consumers.
+    try
+        if isa(res, AbstractVector)
+            builtins = PythonCall.pyimport("builtins")
+            pylist_fn = getproperty(builtins, :list)
+            return pylist_fn(res)
+        end
+    catch err
+        @warn "send_function: failed to convert Vector to Python list" err=err
+    end
+    return res
 end
 
 """Helper called by the macro: evaluate an argument tuple and call `send_command`.

@@ -74,6 +74,10 @@ end)
 const COMM_QUEUES = Dict{String, Channel{String}}()
 # Pending per-request reply channels keyed by request id
 const PENDING_REPLIES = Dict{String, Channel{Any}}()
+# Observer queues for downstream consumers (only object_update messages)
+const OBSERVER_QUEUES = Dict{String, Channel{String}}()
+# Recently-seen reply ids per-comm to ignore duplicates
+const SEEN_REPLIES = Dict{String, Set{String}}()
 # Default timeout (seconds) to wait for a reply from the frontend via comm
 const COMM_REPLY_TIMEOUT = 10.0
 # (No stored/pending reply state — inbound messages are delivered
@@ -82,10 +86,131 @@ function _enqueue_comm_message(key::String, data::String)
     println("[comm_direct] enqueue attempt for key:", key, " at ", time())
     println("[comm_direct] data to enqueue: ", data)
     try
+        # Ensure queue exists
         if !haskey(COMM_QUEUES, key)
             COMM_QUEUES[key] = Channel{String}(64)
         end
         ch = COMM_QUEUES[key]
+
+        # Try parse JSON to allow special handling for bulk_actions and req_id
+        parsed = nothing
+        try
+            parsed = JSON.parse(data)
+        catch
+            parsed = nothing
+        end
+
+        # Helper to mark seen
+        function _mark_seen_if_needed(k, rid)
+            if !haskey(SEEN_REPLIES, k)
+                SEEN_REPLIES[k] = Set{String}()
+            end
+            push!(SEEN_REPLIES[k], rid)
+        end
+
+        # If this is a bulk_actions wrapper, split and handle each item
+        if isa(parsed, AbstractDict) && haskey(parsed, "type") && string(parsed["type"]) == "bulk_actions"
+            pl = get(parsed, "payload", nothing)
+            if isa(pl, AbstractArray)
+                for item in pl
+                    s_item = try JSON.json(item) catch _; string(item) end
+                    # deliver to pending reply if req_id matches
+                    try
+                        if isa(item, AbstractDict) && haskey(item, "req_id")
+                            rid = string(item["req_id"])
+                                if haskey(PENDING_REPLIES, rid) && !(haskey(SEEN_REPLIES, key) && (rid in SEEN_REPLIES[key]))
+                                    try
+                                        # unwrap payload.value when present to match comm_bridge semantics
+                                        to_put = item
+                                        try
+                                            if isa(item, AbstractDict) && haskey(item, "payload")
+                                                pl = get(item, "payload", nothing)
+                                                if isa(pl, AbstractDict) && haskey(pl, "value")
+                                                    to_put = pl["value"]
+                                                end
+                                            end
+                                        catch
+                                        end
+                                        put!(PENDING_REPLIES[rid], to_put)
+                                        _mark_seen_if_needed(key, rid)
+                                    catch err_put
+                                        @warn "comm_direct: failed to put bulk reply to pending" err=err_put req_id=rid
+                                    end
+                                continue
+                            end
+                        end
+                    catch err_inner
+                        @warn "comm_direct: error handling bulk item pending check" err=err_inner
+                    end
+
+                    # forward object_update messages to observer queue
+                    try
+                        if isa(item, AbstractDict) && get(item, "type", "") == "object_update"
+                            q = _ensure_observer_queue(key)
+                            put!(q, s_item)
+                            continue
+                        end
+                    catch err_obs
+                        @warn "comm_direct: failed to forward object_update to observer" err=err_obs
+                    end
+
+                    # otherwise enqueue the single item string
+                    try
+                        put!(ch, s_item)
+                    catch err_put2
+                        @warn "comm_direct: failed to enqueue bulk item" err=err_put2
+                    end
+                end
+                println("[comm_direct] enqueued bulk_actions items for key:", key)
+                return nothing
+            end
+        end
+
+        # Not a bulk_actions wrapper: handle direct req_id deliveries and object_update
+        if isa(parsed, AbstractDict)
+            # deliver directly to pending reply if req_id matches
+            try
+                if haskey(parsed, "req_id")
+                    rid = string(parsed["req_id"])
+                        if haskey(PENDING_REPLIES, rid) && !(haskey(SEEN_REPLIES, key) && (rid in SEEN_REPLIES[key]))
+                            try
+                                # unwrap payload.value when present so callers see the inner value
+                                to_put = parsed
+                                try
+                                    if isa(parsed, AbstractDict) && haskey(parsed, "payload")
+                                        pl = get(parsed, "payload", nothing)
+                                        if isa(pl, AbstractDict) && haskey(pl, "value")
+                                            to_put = pl["value"]
+                                        end
+                                    end
+                                catch
+                                end
+                                put!(PENDING_REPLIES[rid], to_put)
+                                _mark_seen_if_needed(key, rid)
+                                return nothing
+                            catch err_put
+                                @warn "comm_direct: failed to put reply to pending" err=err_put req_id=rid
+                            end
+                    end
+                end
+            catch err_inner2
+                @warn "comm_direct: error checking direct pending reply" err=err_inner2
+            end
+
+            # forward object_update messages to observer queue
+            try
+                if get(parsed, "type", "") == "object_update"
+                    q = _ensure_observer_queue(key)
+                    put!(q, JSON.json(parsed))
+                    println("[comm_direct] forwarded object_update to observer for key:", key)
+                    return nothing
+                end
+            catch err_obs2
+                @warn "comm_direct: failed to forward object_update" err=err_obs2
+            end
+        end
+
+        # Default: enqueue the raw string
         try
             println("[comm_direct] enqueued message for key:", key, " at ", time())
             println("[comm_direct] COMM_QUEUES[\"$key\"]: ", (COMM_QUEUES[key]))
@@ -129,6 +254,18 @@ function _wait_on_pending(id::String; timeout::Real=COMM_REPLY_TIMEOUT)
     t0 = time()
         @info "comm_direct: awaiting reply" req_id=id keys_pending=collect(keys(PENDING_REPLIES))
         while true
+        # First, check whether the reply has already been enqueued in any
+        # comm queue while the kernel was busy. If so, deliver it immediately.
+        try
+            found = _scan_all_comm_queues_for_reqid(id)
+            if found !== nothing
+                val = found
+                delete!(PENDING_REPLIES, id)
+                return val
+            end
+        catch err_scan
+            @warn "comm_direct: error scanning comm queues" err=err_scan req_id=id
+        end
         if isready(ch)
             val = take!(ch)
             delete!(PENDING_REPLIES, id)
@@ -298,12 +435,207 @@ function send_and_wait_for_id(key::String, payload; timeout::Real=COMM_REPLY_TIM
         rethrow(err)
     end
 
+    # After sending, attempt to scan existing per-comm queues for a reply
+    # that may have been enqueued while the kernel was busy. If found,
+    # deliver it immediately to the pending channel so callers see it.
+    try
+        found = _scan_comm_queue_for_reqid(key, rid)
+        if found !== nothing
+            try
+                put!(PENDING_REPLIES[rid], found)
+            catch err_put
+                @warn "comm_direct: failed to deliver found reply to pending" err=err_put req_id=rid
+            end
+        end
+    catch err_scan
+        @warn "comm_direct: error scanning comm queue after send" err=err_scan req_id=rid key=key
+    end
+
     # wait for matching reply in a background task so comm callbacks can run
     t = @async begin
         return _wait_on_pending(rid; timeout=timeout)
     end
     wait(t)
     return fetch(t)
+end
+
+
+#########################
+# Queue scanning helpers
+#########################
+
+function _ensure_observer_queue(key::String)
+    if !haskey(OBSERVER_QUEUES, key)
+        OBSERVER_QUEUES[key] = Channel{String}(128)
+    end
+    return OBSERVER_QUEUES[key]
+end
+
+function _scan_comm_queue_for_reqid(key::String, rid::String)
+    # Drain available messages from the comm queue, look for a message
+    # whose req_id matches `rid`. Unpack bulk_actions and forward
+    # object_update items to observer queue. Non-matching messages are
+    # buffered and re-queued to preserve them.
+    if !haskey(COMM_QUEUES, key)
+        return nothing
+    end
+    ch = COMM_QUEUES[key]
+    buf = String[]
+    found = nothing
+    while isready(ch)
+        s = take!(ch)
+        parsed = nothing
+        try
+            parsed = JSON.parse(s)
+        catch
+            parsed = nothing
+        end
+        handled = false
+        if isa(parsed, AbstractDict)
+            # handle bulk_actions by splitting payload and forwarding object_update
+            if haskey(parsed, "type") && string(parsed["type"]) == "bulk_actions"
+                pl = get(parsed, "payload", nothing)
+                if isa(pl, AbstractArray)
+                    for item in pl
+                        try
+                            # if item contains a req_id matching rid (search nested)
+                            rid_item = _extract_reqid(item)
+                            if rid_item !== nothing && string(rid_item) == rid
+                                if !haskey(SEEN_REPLIES, key)
+                                    SEEN_REPLIES[key] = Set{String}()
+                                end
+                                if !(rid in SEEN_REPLIES[key])
+                                    found = item
+                                    push!(SEEN_REPLIES[key], rid)
+                                end
+                            end
+                            # forward object_update items to observer queue
+                            if isa(item, AbstractDict) && get(item, "type", "") == "object_update"
+                                q = _ensure_observer_queue(key)
+                                put!(q, JSON.json(item))
+                            end
+                        catch err_item
+                            @warn "comm_direct: error handling bulk_actions item" err=err_item
+                        end
+                    end
+                    handled = true
+                end
+            else
+                # direct req_id match
+                rid_parsed = _extract_reqid(parsed)
+                if rid_parsed !== nothing && string(rid_parsed) == rid
+                    if !haskey(SEEN_REPLIES, key)
+                        SEEN_REPLIES[key] = Set{String}()
+                    end
+                    if !(rid in SEEN_REPLIES[key])
+                        found = parsed
+                        push!(SEEN_REPLIES[key], rid)
+                        handled = true
+                    else
+                        # duplicate — ignore
+                        handled = true
+                    end
+                end
+                # forward object_update top-level messages to observer queue
+                if !handled && get(parsed, "type", "") == "object_update"
+                    q = _ensure_observer_queue(key)
+                    put!(q, JSON.json(parsed))
+                    handled = true
+                end
+            end
+        end
+        if !handled
+            push!(buf, s)
+        end
+    end
+    # re-queue buffered items in original order
+    for s in buf
+        put!(ch, s)
+    end
+    return found
+end
+
+function _scan_all_comm_queues_for_reqid(rid::String)
+    for k in keys(COMM_QUEUES)
+        try
+            found = _scan_comm_queue_for_reqid(k, rid)
+            if found !== nothing
+                return found
+            end
+        catch err
+            @warn "comm_direct: error scanning queue for key" key=k err=err
+        end
+    end
+    return nothing
+end
+
+
+function _extract_reqid(obj)
+    # Search for req_id|id|request_id recursively in Dict/Array structures
+    try
+        if isa(obj, AbstractDict)
+            for k in ("req_id", "id", "request_id")
+                if haskey(obj, k)
+                    return obj[k]
+                end
+            end
+            for v in values(obj)
+                found = _extract_reqid(v)
+                if found !== nothing
+                    return found
+                end
+            end
+        elseif isa(obj, AbstractArray)
+            for v in obj
+                found = _extract_reqid(v)
+                if found !== nothing
+                    return found
+                end
+            end
+        end
+    catch
+        # ignore parsing errors
+    end
+    return nothing
+end
+
+
+"""Peek into a comm queue without losing messages.
+Returns an array of the JSON strings currently queued for `key`.
+"""
+function peek_comm_queue(key::String)
+    if !haskey(COMM_QUEUES, key)
+        return String[]
+    end
+    ch = COMM_QUEUES[key]
+    buf = String[]
+    while isready(ch)
+        push!(buf, take!(ch))
+    end
+    # re-queue in same order
+    for s in buf
+        put!(ch, s)
+    end
+    return buf
+end
+
+"""Force-scan and process the comm queue for `key`.
+Returns the found reply (Dict) if a matching `req_id` was located, otherwise `nothing`.
+Also unpacks `bulk_actions` and forwards `object_update` items to observer queue.
+"""
+function process_comm_queue_for_key(key::String, rid::Union{String,Nothing}=nothing)
+    if rid === nothing
+        # just run the generic scan that forwards object_update items
+        _scan_comm_queue_for_reqid(key, "__no_search__")
+        return nothing
+    else
+        return _scan_comm_queue_for_reqid(key, rid)
+    end
+end
+
+"""Return the observer queue channel for `key`, or nothing if none exists."""
+function get_observer_queue(key::String)
+    return get(OBSERVER_QUEUES, key, nothing)
 end
 
 """Send payload via comm `key` and asynchronously wait for the next
@@ -385,9 +717,12 @@ function IJulia.CommManager.register_comm(comm::IJulia.CommManager.Comm{Symbol("
                 end
                 # If message has req_id and there is a pending waiter, deliver directly
                 try
-                    if isa(parsed, AbstractDict) && (haskey(parsed, "req_id") || haskey(parsed, "id") || haskey(parsed, "request_id"))
-                        rid = string(get(parsed, "req_id", get(parsed, "id", get(parsed, "request_id", nothing))))
-                            @info "comm_direct: incoming message with req_id" rid=rid keys_pending=collect(keys(PENDING_REPLIES))
+                    if isa(parsed, AbstractDict)
+                        # attempt to extract any req_id/id/request_id recursively so
+                        # nested replies (e.g. function results) are matched.
+                        rid_any = _extract_reqid(parsed)
+                        rid = rid_any === nothing ? nothing : string(rid_any)
+                        @info "comm_direct: incoming message with req_id" rid=rid keys_pending=collect(keys(PENDING_REPLIES))
                         if rid !== nothing && haskey(PENDING_REPLIES, rid)
                             ch = PENDING_REPLIES[rid]
                             try

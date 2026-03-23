@@ -54,10 +54,16 @@ function send_command_tcp(cmd_text::AbstractString; host::String="127.0.0.1", po
 end
 
 function send_function_tcp(name, args...; host::String="127.0.0.1", port::Int=8765)
-    name_str = isa(name, Symbol) ? string(name) : string(name)
+    # If `name` is a collection, send it as a JSON array of strings so the
+    # frontend receives a real list instead of Julia's printed representation.
+    if isa(name, AbstractArray)
+        name_field = [isa(n, Symbol) ? string(n) : string(n) for n in name]
+    else
+        name_field = isa(name, Symbol) ? string(name) : string(name)
+    end
     arg_strs = [string(a) for a in args]
     args_field = length(arg_strs) == 0 ? nothing : arg_strs
-    payload = Dict("type"=>"function", "payload"=>Dict("name"=>name_str, "args"=>args_field))
+    payload = Dict("type"=>"function", "payload"=>Dict("name"=>name_field, "args"=>args_field))
     resp = request_tcp(payload; host=host, port=port)
     try
         if resp isa AbstractDict && haskey(resp, "value")
@@ -110,10 +116,16 @@ function send_command(cmd_text::AbstractString; host::String="127.0.0.1", port::
 end
 
 function send_function(name, args...; host::String="127.0.0.1", port::Int=8765)
-    name_str = isa(name, Symbol) ? string(name) : string(name)
+    # If `name` is iterable, convert to an array of strings so the JSON payload
+    # contains a proper list instead of a single string like "Any[...]".
+    if isa(name, AbstractArray)
+        name_field = [isa(n, Symbol) ? string(n) : string(n) for n in name]
+    else
+        name_field = isa(name, Symbol) ? string(name) : string(name)
+    end
     arg_strs = [string(a) for a in args]
     args_field = length(arg_strs) == 0 ? nothing : arg_strs
-    payload = Dict("type"=>"function", "payload"=>Dict("name"=>name_str, "args"=>args_field))
+    payload = Dict("type"=>"function", "payload"=>Dict("name"=>name_field, "args"=>args_field))
     resp = request(payload; host=host, port=port)
     try
         if resp isa AbstractDict && haskey(resp, "value")
