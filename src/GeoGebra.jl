@@ -270,6 +270,20 @@ function send_function(name, args...; host::String=DEFAULT_HOST, port::Int=DEFAU
     return res
 end
 
+"""Send a `listen` message to the bridge.
+
+The message payload is of the form:
+`{"type":"listen","payload":[label::String, enabled::Bool]}`.
+
+`label` may be a `GGBObject`, `Symbol`, or `String`.
+"""
+function send_listen(label; enabled::Bool=true, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+    # normalize label to string
+    lbl = isa(label, GGBObject) ? label.label : (isa(label, Symbol) ? string(label) : string(label))
+    payload = Dict("type"=>"listen", "payload"=>[lbl, enabled])
+    return CommBridge.request(payload; host=host, port=port)
+end
+
 """Helper called by the macro: evaluate an argument tuple and call `send_command`.
 When arguments include a `GGBObject`, replace it with its `label` before sending."""
 function send_command_eval(name, args_tuple)
