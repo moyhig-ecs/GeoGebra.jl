@@ -297,440 +297,239 @@ function send_function_eval(name, args_tuple)
     return CommBridge.send_function_eval(name, args_tuple; host=DEFAULT_HOST, port=DEFAULT_PORT)
 end
 
-# """Convert SymPy (Sym/Py) scalar or matrix values into a GeoGebra
-# matrix/expr string.
 
-# Signature:
-# `function sympy_to_ggb(x::Union{Matrix{Sym{SymPyPythonCall.Py}}, Sym{SymPyPythonCall.Py}})`
+# # Lightweight wrapper for objects created in the GeoGebra applet.
+# mutable struct GGBObject
+#     label::String
+#     data::Any
+# end
 
-# If `x` is a Julia matrix of `Sym` elements, each element is stringified
-# and assembled into a GeoGebra matrix like `{{a,b},{c,d}}`.
-# If `x` is a Sym (Python-backed) value and its string form contains a
-# bracketed matrix like `[...]`, the inner rows are parsed and converted
-# to the GeoGebra nested-brace form. Otherwise the function returns the
-# string representation of `x`.
+# # Display only the label for brevity in REPL and printing
+# Base.show(io::IO, ::MIME"text/plain", g::GGBObject) = print(io, g.label)
+# Base.show(io::IO, g::GGBObject) = print(io, g.data)
+
+# # Implicit construction protocol (default construction protocol storage).
+# # Use a `Ref` to allow rebinding the contained vector without changing the
+# # exported binding; users should use provided APIs rather than touching this.
+# const _CONSRUCTION_PROTOCOL = Ref{Vector{GGBObject}}(GGBObject[])
+
+# """Return the current construction protocol vector (live reference)."""
+# function construction_protocol()
+#     return _CONSRUCTION_PROTOCOL[]
+# end
+
+# """Start a new construction by clearing the construction history in-place
+# and return the cleared vector. Named `new_construction!` to mirror the
+# GeoGebra API `newConstruction()`.
 # """
-# function sympy_to_ggb(x::Union{Matrix{Sym{SymPyPythonCall.Py}}, Sym{SymPyPythonCall.Py}})
-#     # Helper: split at top-level separators only (ignore separators inside
-#     # parentheses/brackets/braces and quoted strings)
-#     function split_top_level(s::AbstractString, seps::AbstractVector{Char})
-#         parts = String[]
-#         buf = IOBuffer()
-#         depth_paren = 0
-#         depth_sq = 0
-#         depth_brace = 0
-#         in_quote = false
-#         quotechar = '\0'
-#         i = 1
-#         while i <= lastindex(s)
-#             ch = s[i]
-#             if in_quote
-#                 if ch == quotechar
-#                     in_quote = false
-#                 end
-#                 write(buf, ch)
-#             else
-#                 if ch == '"' || ch == '\''
-#                     in_quote = true
-#                     quotechar = ch
-#                     write(buf, ch)
-#                 elseif ch == '('
-#                     depth_paren += 1; write(buf, ch)
-#                 elseif ch == ')'
-#                     depth_paren = max(depth_paren - 1, 0); write(buf, ch)
-#                 elseif ch == '['
-#                     depth_sq += 1; write(buf, ch)
-#                 elseif ch == ']'
-#                     depth_sq = max(depth_sq - 1, 0); write(buf, ch)
-#                 elseif ch == '{'
-#                     depth_brace += 1; write(buf, ch)
-#                 elseif ch == '}'
-#                     depth_brace = max(depth_brace - 1, 0); write(buf, ch)
-#                 elseif depth_paren == 0 && depth_sq == 0 && depth_brace == 0 && ch in seps
-#                     push!(parts, String(take!(buf)))
-#                 else
-#                     write(buf, ch)
-#                 end
-#             end
-#             i += 1
-#         end
-#         push!(parts, String(take!(buf)))
-#         return [strip(p) for p in parts if strip(p) != ""]
-#     end
-
-#     # Matrix-of-Sym elements (native Julia matrix)
-#     if x isa AbstractMatrix
-#         r = Int(size(x, 1)); c = Int(size(x, 2))
-#         rows = String[]
-#         for i in 1:r
-#             elems = String[]
-#             for j in 1:c
-#                 push!(elems, string(x[i, j]))
-#             end
-#             push!(rows, "{" * join(elems, ", ") * "}")
-#         end
-#         return "{" * join(rows, ", ") * "}"
-#     end
-
-#     # Sym{Py} scalar or Python-side Matrix printed as a string
-#     s = string(x)
-#     # Extract the first bracketed region (outermost '[' ... ']') if present
-#     function extract_bracket_inner(str::AbstractString)
-#         starti = findfirst(c -> c == '[', str)
-#         if starti === nothing
-#             return nothing
-#         end
-#         depth = 0
-#         i = starti
-#         buf = IOBuffer()
-#         while i <= lastindex(str)
-#             ch = str[i]
-#             if ch == '['
-#                 depth += 1
-#                 if depth > 1
-#                     write(buf, ch)
-#                 end
-#             elseif ch == ']'
-#                 depth -= 1
-#                 if depth == 0
-#                     return String(take!(buf))
-#                 else
-#                     write(buf, ch)
-#                 end
-#             else
-#                 if depth >= 1
-#                     write(buf, ch)
-#                 end
-#             end
-#             i += 1
-#         end
-#         return nothing
-#     end
-
-#     inner = extract_bracket_inner(s)
-#     if inner === nothing
-#         return s
-#     end
-
-#     # Try semicolon row separators first (SymPy printable matrix may use ';')
-#     rows = split_top_level(inner, [';'])
-#     if length(rows) == 1
-#         # Fallback: split top-level on comma which separates inner-row lists
-#         rows = split_top_level(inner, [','])
-#         # If rows look like bracketed inner lists, e.g. "[a,b],[c,d]",
-#         # then rows currently will be like "[a,b]" and "[c,d]" — remove
-#         # surrounding brackets for each row before splitting elements.
-#     end
-
-#     parsed_rows = String[]
-#     for rr in rows
-#         rtrim = rr
-#         # remove surrounding brackets if present
-#         if startswith(rtrim, "[") && endswith(rtrim, "]")
-#             rtrim = rtrim[2:end-1]
-#         elseif startswith(rtrim, "[") && endswith(rtrim, "]")
-#             rtrim = rtrim[2:end-1]
-#         end
-#         # split elements by top-level comma first
-#         elems = split_top_level(rtrim, [','])
-#         if length(elems) == 1
-#             # maybe elements are space-separated (SymPy row like "a b c")
-#             # split on whitespace at top level
-#             # reuse split_top_level by treating space as separator
-#             elems = split_top_level(rtrim, [' '])
-#         end
-#         push!(parsed_rows, "{" * join(elems, ", ") * "}")
-#     end
-#     return "{" * join(parsed_rows, ", ") * "}"
+# function new_construction!()
+#     # Call the GeoGebra bridge to create a new construction, clear local
+#     # protocol, and return the bridge response.
+#     resp = send_function("newConstruction")
+#     empty!(_CONSRUCTION_PROTOCOL[])
+#     return _CONSRUCTION_PROTOCOL[]
 # end
 
-# # Convert an Expr/Symbol/QuoteNode into a GeoGebra command string.
-# # Used by the macros to stringify RHS expressions safely.
-# function expr_to_cmd_string(ex)
-#     if ex isa QuoteNode
-#         v = ex.value
-#         if isa(v, Symbol)
-#             return string(v)
-#         elseif isa(v, String)
-#             return v
-#         else
-#             return string(v)
-#         end
-#     elseif ex isa Symbol
-#         return string(ex)
-#     elseif ex isa Expr
-#         # call expression
-#         if ex.head == :call && length(ex.args) >= 1
-#             fn_raw = ex.args[1]
-#             # Handle common infix/binary operators using conventional notation
-#             op = isa(fn_raw, Symbol) ? string(fn_raw) : ""
-#             if op in ("+", "-", "*", "/", "^", "==", "<", ">", "<=", ">=", "!=", "&", "|", "%")
-#                 nargs = length(ex.args) - 1
-#                 # unary minus
-#                 if op == "-" && nargs == 1
-#                     return "-" * expr_to_cmd_string(ex.args[2])
-#                 end
-#                 parts = [expr_to_cmd_string(a) for a in ex.args[2:end]]
-#                 if nargs == 2
-#                 return "(" * join(parts[1:2], " " * op * " ") * ")"
-#                 else
-#                     # chain multiple operands: a + b + c
-#                     return join(parts, " " * op * " ")
-#                 end
-#             else
-#                 # regular function-style call: name(arg1, arg2, ...)
-#                 fname = expr_to_cmd_string(fn_raw)
-#                 parts = [expr_to_cmd_string(a) for a in ex.args[2:end]]
-#                 return fname * "(" * join(parts, ", ") * ")"
-#             end
-#         elseif ex.head == :vect
-#             parts = [expr_to_cmd_string(a) for a in ex.args]
-#             return "{" * join(parts, ", ") * "}"
-#         else
-#             try
-#                 return string(ex)
-#             catch
-#                 return string(ex)
-#             end
-#         end
-#     else
-#         return string(ex)
-#     end
-# end
-
-
-# Lightweight wrapper for objects created in the GeoGebra applet.
-mutable struct GGBObject
-    label::String
-    data::Any
-end
-
-# Display only the label for brevity in REPL and printing
-Base.show(io::IO, ::MIME"text/plain", g::GGBObject) = print(io, g.label)
-Base.show(io::IO, g::GGBObject) = print(io, g.data)
-
-# Implicit construction protocol (default construction protocol storage).
-# Use a `Ref` to allow rebinding the contained vector without changing the
-# exported binding; users should use provided APIs rather than touching this.
-const _CONSRUCTION_PROTOCOL = Ref{Vector{GGBObject}}(GGBObject[])
-
-"""Return the current construction protocol vector (live reference)."""
-function construction_protocol()
-    return _CONSRUCTION_PROTOCOL[]
-end
-
-"""Start a new construction by clearing the construction history in-place
-and return the cleared vector. Named `new_construction!` to mirror the
-GeoGebra API `newConstruction()`.
-"""
-function new_construction!()
-    # Call the GeoGebra bridge to create a new construction, clear local
-    # protocol, and return the bridge response.
-    resp = send_function("newConstruction")
-    empty!(_CONSRUCTION_PROTOCOL[])
-    return _CONSRUCTION_PROTOCOL[]
-end
-
-"""Dump the construction history to `path` as a simple textual report.
-Each entry contains the object's label and a `show` rendering of its data.
-"""
+# """Dump the construction history to `path` as a simple textual report.
+# Each entry contains the object's label and a `show` rendering of its data.
+# """
  
 
-"""Internal helper to append result(s) into the construction history.
-Accepts a single `GGBObject` or a vector of them."""
-function _push_construction_result!(res)
-    if isa(res, GGBObject)
-        push!(_CONSRUCTION_PROTOCOL[], res)
-    elseif isa(res, AbstractVector{GGBObject})
-        append!(_CONSRUCTION_PROTOCOL[], res)
-    end
-    return _CONSRUCTION_PROTOCOL[]
-end
+# """Internal helper to append result(s) into the construction history.
+# Accepts a single `GGBObject` or a vector of them."""
+# function _push_construction_result!(res)
+#     if isa(res, GGBObject)
+#         push!(_CONSRUCTION_PROTOCOL[], res)
+#     elseif isa(res, AbstractVector{GGBObject})
+#         append!(_CONSRUCTION_PROTOCOL[], res)
+#     end
+#     return _CONSRUCTION_PROTOCOL[]
+# end
 
 
-"""Encode a single `element`-shaped dict using the Python-side schema
-and send it to the applet via the `evalXML` API.
+# """Encode a single `element`-shaped dict using the Python-side schema
+# and send it to the applet via the `evalXML` API.
 
-`elem_data` should be the dictionary representing a single element as
-produced in `GGBObject.data["element"][i]`.
-"""
-function evalXML_from_element(elem_data; host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
-    try
-        xmlschema = PythonCall.pyimport("xmlschema")
-        # Use the Python-side ggblab.schema wrapper for encode/decode.
-        ggb_schema = PythonCall.pyimport("ggblab.schema").ggb_schema()
-        schema = ggb_schema.schema
-        # Encode the element into an ElementTree (or compatible object)
-        encoded = schema.encode(elem_data, "element")
-        # Serialize to bytes/string using xmlschema helper
-        xml_str = xmlschema.etree_tostring(encoded)
-        return send_function("evalXML", xml_str; host=host, port=port)
-    catch e
-        throw(ErrorException("Failed to evalXML from element: $(e)"))
-    end
-end
-
-
-"""Convenience mutating helper: take a `GGBObject` whose `data` has an
-`"element"` array, reserialize the specified element index back to XML
-and send it to the applet via `evalXML`.
-
-Usage:
-```
-# modify p1.data["element"][1] as needed
-set_object!(p1)                 # sends element at index 1 (1-based)
-set_object!(p1, element_index=1) # explicit
-```
-"""
-function set_object!(g::GGBObject; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
-    # Attempt to obtain the "element" collection in a way that works for
-    # both native Julia dicts/vectors and Python-callable PyObject mappings.
-    elems = nothing
-    # Try Julia-style Dict access first
-    try
-        elems = g.data["element"]
-    catch
-    end
-    # Fallback: try attribute access on PyObject
-    if elems === nothing
-        try
-            elems = getproperty(g.data, "element")
-        catch
-        end
-    end
-
-    if elems === nothing
-        throw(ErrorException("GGBObject.data does not contain an \"element\" array"))
-    end
-
-    # Attempt to index the collection. PythonCall indexes usually behave like
-    # 1-based Julia indexing, but wrap in try/catch to provide helpful errors.
-    elem = nothing
-    try
-        elem = elems[element_index]
-    catch
-        try
-            # If the Python sequence is 0-based, try element_index-1
-            elem = elems[element_index - 1]
-        catch
-            throw(BoundsError(elems, element_index))
-        end
-    end
-
-    return evalXML_from_element(elem; host=host, port=port)
-end
+# `elem_data` should be the dictionary representing a single element as
+# produced in `GGBObject.data["element"][i]`.
+# """
+# function evalXML_from_element(elem_data; host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+#     try
+#         xmlschema = PythonCall.pyimport("xmlschema")
+#         # Use the Python-side ggblab.schema wrapper for encode/decode.
+#         ggb_schema = PythonCall.pyimport("ggblab.schema").ggb_schema()
+#         schema = ggb_schema.schema
+#         # Encode the element into an ElementTree (or compatible object)
+#         encoded = schema.encode(elem_data, "element")
+#         # Serialize to bytes/string using xmlschema helper
+#         xml_str = xmlschema.etree_tostring(encoded)
+#         return send_function("evalXML", xml_str; host=host, port=port)
+#     catch e
+#         throw(ErrorException("Failed to evalXML from element: $(e)"))
+#     end
+# end
 
 
-"""A lightweight Julia wrapper for objects created in the GeoGebra applet.
-Holds the assigned `label` and the decoded `data` (a Python dict as PyObject).
-"""
+# """Convenience mutating helper: take a `GGBObject` whose `data` has an
+# `"element"` array, reserialize the specified element index back to XML
+# and send it to the applet via `evalXML`.
 
-"""Refresh `g.data` by re-fetching the object's XML and decoding it.
-Returns the updated `GGBObject` (modified in-place).
-"""
-function refresh(g::GGBObject)
-    new = fetch_object(g.label)
-    g.data = new.data
-    return g
-end
+# Usage:
+# ```
+# # modify p1.data["element"][1] as needed
+# set_object!(p1)                 # sends element at index 1 (1-based)
+# set_object!(p1, element_index=1) # explicit
+# ```
+# """
+# function set_object!(g::GGBObject; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+#     # Attempt to obtain the "element" collection in a way that works for
+#     # both native Julia dicts/vectors and Python-callable PyObject mappings.
+#     elems = nothing
+#     # Try Julia-style Dict access first
+#     try
+#         elems = g.data["element"]
+#     catch
+#     end
+#     # Fallback: try attribute access on PyObject
+#     if elems === nothing
+#         try
+#             elems = getproperty(g.data, "element")
+#         catch
+#         end
+#     end
 
-"""Mutating alias following Julia convention: `refresh!(g)` updates `g.data` in-place."""
-function refresh!(g::GGBObject)
-    return refresh(g)
-end
+#     if elems === nothing
+#         throw(ErrorException("GGBObject.data does not contain an \"element\" array"))
+#     end
 
-"""Fetch an object's XML from the applet and decode it using the Python
-`ggblab.schema.decode` function. Returns a `GGBObject`.
-"""
-function fetch_object(label::AbstractString)
-    xml_str = ""
-    try
-        xml_str = send_function("getXML", string(label); host=DEFAULT_HOST, port=DEFAULT_PORT)
-    catch e
-        throw(ErrorException("Failed to get XML for label $(label): $(e)"))
-    end
-    try
-        # Use the ggblab.schema entrypoint for decode to ensure we call
-        # the correct wrapper object: ggb_schema().schema
-        ggb_schema = PythonCall.pyimport("ggblab.schema").ggb_schema()
-        schema = ggb_schema.schema
-        s = strip(xml_str)
-        if startswith(s, "<construction")
-            xml_to_decode = s
-        else
-            # wrap in a single root to handle multi-root responses
-            xml_to_decode = "<construction>" * s * "</construction>"
-        end
-        pydict = schema.decode(xml_to_decode)
-        return GGBObject(string(label), pydict)
-    catch e
-        throw(ErrorException("Failed to decode XML for label $(label): $(e)"))
-    end
-end
+#     # Attempt to index the collection. PythonCall indexes usually behave like
+#     # 1-based Julia indexing, but wrap in try/catch to provide helpful errors.
+#     elem = nothing
+#     try
+#         elem = elems[element_index]
+#     catch
+#         try
+#             # If the Python sequence is 0-based, try element_index-1
+#             elem = elems[element_index - 1]
+#         catch
+#             throw(BoundsError(elems, element_index))
+#         end
+#     end
 
-"""Process a comma-separated labels response like "A,b,c" and fetch each
-object via `fetch_object`. Returns a single `GGBObject` when one label,
-otherwise a Vector{GGBObject}.
-"""
-function process_labels_response(resp)
-    if !(resp isa AbstractString)
-        return resp
-    end
-    labels = [strip(s) for s in split(resp, ',') if strip(s) != ""]
-    # println("Processing labels response: ", labels)
-    objs = [fetch_object(lbl) for lbl in labels]
-    return length(objs) == 1 ? objs[1] : objs
-end
-
-"""Return a Vector of `GGBObject` for all objects currently in the applet.
-This calls the applet function `getAllObjectNames` and then fetches each
-object's XML and decodes it.
-"""
-# `list_objects` removed — it did not behave as expected. Use
-# `refresh_all_objects!` which queries the applet and fetches objects.
-
-"""Refresh all `GGBObject`s in `objs` in-place. Returns `objs`."""
-function refresh!(objs::AbstractVector{GGBObject})
-    for g in objs
-        try
-            refresh!(g)
-        catch
-            # ignore individual failures
-        end
-    end
-    return objs
-end
+#     return evalXML_from_element(elem; host=host, port=port)
+# end
 
 
-"""Send each `GGBObject` in `objs` back to the applet by reserializing
-the specified element and calling `evalXML` for each. Mirrors `refresh!`'s
-vector form and returns `objs`.
-"""
-function set_object!(objs::AbstractVector{GGBObject}; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
-    for g in objs
-        try
-            set_object!(g; element_index=element_index, host=host, port=port)
-        catch
-            # ignore individual failures to match refresh! semantics
-        end
-    end
-    return objs
-end
+# """A lightweight Julia wrapper for objects created in the GeoGebra applet.
+# Holds the assigned `label` and the decoded `data` (a Python dict as PyObject).
+# """
+
+# """Refresh `g.data` by re-fetching the object's XML and decoding it.
+# Returns the updated `GGBObject` (modified in-place).
+# """
+# function refresh(g::GGBObject)
+#     new = fetch_object(g.label)
+#     g.data = new.data
+#     return g
+# end
+
+# """Mutating alias following Julia convention: `refresh!(g)` updates `g.data` in-place."""
+# function refresh!(g::GGBObject)
+#     return refresh(g)
+# end
+
+# """Fetch an object's XML from the applet and decode it using the Python
+# `ggblab.schema.decode` function. Returns a `GGBObject`.
+# """
+# function fetch_object(label::AbstractString)
+#     xml_str = ""
+#     try
+#         xml_str = send_function("getXML", string(label); host=DEFAULT_HOST, port=DEFAULT_PORT)
+#     catch e
+#         throw(ErrorException("Failed to get XML for label $(label): $(e)"))
+#     end
+#     try
+#         # Use the ggblab.schema entrypoint for decode to ensure we call
+#         # the correct wrapper object: ggb_schema().schema
+#         ggb_schema = PythonCall.pyimport("ggblab.schema").ggb_schema()
+#         schema = ggb_schema.schema
+#         s = strip(xml_str)
+#         if startswith(s, "<construction")
+#             xml_to_decode = s
+#         else
+#             # wrap in a single root to handle multi-root responses
+#             xml_to_decode = "<construction>" * s * "</construction>"
+#         end
+#         pydict = schema.decode(xml_to_decode)
+#         return GGBObject(string(label), pydict)
+#     catch e
+#         throw(ErrorException("Failed to decode XML for label $(label): $(e)"))
+#     end
+# end
+
+# """Process a comma-separated labels response like "A,b,c" and fetch each
+# object via `fetch_object`. Returns a single `GGBObject` when one label,
+# otherwise a Vector{GGBObject}.
+# """
+# function process_labels_response(resp)
+#     if !(resp isa AbstractString)
+#         return resp
+#     end
+#     labels = [strip(s) for s in split(resp, ',') if strip(s) != ""]
+#     # println("Processing labels response: ", labels)
+#     objs = [fetch_object(lbl) for lbl in labels]
+#     return length(objs) == 1 ? objs[1] : objs
+# end
+
+# """Return a Vector of `GGBObject` for all objects currently in the applet.
+# This calls the applet function `getAllObjectNames` and then fetches each
+# object's XML and decodes it.
+# """
+# # `list_objects` removed — it did not behave as expected. Use
+# # `refresh_all_objects!` which queries the applet and fetches objects.
+
+# """Refresh all `GGBObject`s in `objs` in-place. Returns `objs`."""
+# function refresh!(objs::AbstractVector{GGBObject})
+#     for g in objs
+#         try
+#             refresh!(g)
+#         catch
+#             # ignore individual failures
+#         end
+#     end
+#     return objs
+# end
 
 
-"""Preferred short name matching `refresh!` symmetry: `set!` is an alias
-to `set_object!` for both scalar and vector forms.
-"""
-function set!(g::GGBObject; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
-    return set_object!(g; element_index=element_index, host=host, port=port)
-end
+# """Send each `GGBObject` in `objs` back to the applet by reserializing
+# the specified element and calling `evalXML` for each. Mirrors `refresh!`'s
+# vector form and returns `objs`.
+# """
+# function set_object!(objs::AbstractVector{GGBObject}; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+#     for g in objs
+#         try
+#             set_object!(g; element_index=element_index, host=host, port=port)
+#         catch
+#             # ignore individual failures to match refresh! semantics
+#         end
+#     end
+#     return objs
+# end
 
-function set!(objs::AbstractVector{GGBObject}; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
-    return set_object!(objs; element_index=element_index, host=host, port=port)
-end
 
-# `refresh_all_objects!` removed — it did not behave as expected. Use
-# `fetch_object` / `refresh!` individually as needed.
+# """Preferred short name matching `refresh!` symmetry: `set!` is an alias
+# to `set_object!` for both scalar and vector forms.
+# """
+# function set!(g::GGBObject; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+#     return set_object!(g; element_index=element_index, host=host, port=port)
+# end
+
+# function set!(objs::AbstractVector{GGBObject}; element_index::Int=1, host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+#     return set_object!(objs; element_index=element_index, host=host, port=port)
+# end
+
+# # `refresh_all_objects!` removed — it did not behave as expected. Use
+# # `fetch_object` / `refresh!` individually as needed.
 
 # `send_command_wrap` was removed; macro now delegates to `@ggblab_command`.
 
@@ -816,657 +615,9 @@ function set_default_port(p::Integer)
     return DEFAULT_PORT
 end
 
+include("ggb_object.jl")
 include("ggb_helpers.jl")
 include("ggb_macros.jl")
-
-# """Handle `@ggblab api fn(args...)` macro branch.
-
-# This internal macro is extracted to handle the API-style invocation:
-# `@ggblab api fn(args...)`. It constructs a runtime call that evaluates
-# arguments in the caller's scope and dispatches to `GeoGebra.send_function_eval`.
-# """
-# # Macro implementing the `@ggblab` command-style behavior.
-# """Send a GeoGebra command expression at runtime.
-
-# `@ggblab_command` is a helper macro used by `@ggblab` to transform an
-# expression such as `Circle(A, 1)` into a string command and send it
-# to the bridge at runtime. Symbol arguments that evaluate to `GGBObject`
-# instances are replaced with their `label` before sending. The macro
-# ensures evaluation happens in the caller's scope and returns the
-# processed response (calling `process_labels_response` as needed).
-# """
-# macro ggblab_function(inner)
-#     if inner isa Expr && inner.head == :call
-#         name = inner.args[1]
-#         arg_nodes = inner.args[2:end]
-#         # Build a tuple of escaped argument expressions so they evaluate in
-#         # the caller's scope. `send_function_eval` will normalize the tuple
-#         # into an array when constructing the JSON payload.
-#         esc_args = Expr[]
-#         for a in arg_nodes
-#             push!(esc_args, esc(a))
-#         end
-#         args_tuple = Expr(:tuple, esc_args...)
-#         call_expr = Expr(:call, Expr(:call, :getfield, :(GeoGebra), QuoteNode(:send_function_eval)), QuoteNode(name), args_tuple)
-#         return esc(call_expr)
-#     else
-#         error("@ggblab api usage must be like `@ggblab api fn(args...)`")
-#     end
-# end
-
-# """Primary user-facing macro to send commands or API calls.
-
-# Usage:
-# - `@ggblab Circle(0, 0, 1)` sends a command string to the bridge.
-# - `@ggblab api getVersion()` sends a function-style payload to the bridge.
-
-# The macro handles leading expansion tokens (LineNumberNode/Module), routes
-# API invocations to `@ggblab_function`, and routes command-style expressions
-# to `@ggblab_command`. The generated runtime calls evaluate arguments in
-# the caller scope so `x = @ggblab Circle(A, 1)` will assign the returned
-# value.
-# """
-
-# macro isdefined_in_module(mod, sym)
-#     return :(isdefined($(esc(mod)), $(QuoteNode(sym))))
-# end
-
-# macro ggblab_command(expr)
-#     # Two modes:
-#     # - call-expr (e.g., Circle(A,1)): evaluate args at runtime so tokens
-#     #   `_`, `__`, `_n` are expanded and GGBObject args are converted to labels.
-#     # - other-expr (e.g., assignment `O = (0,0)`): fall back to string
-#     #   construction at macro-expansion time (original behavior).
-#     if expr isa Expr && expr.head == :call
-#         name = expr.args[1]
-#         arg_nodes = expr.args[2:end]
-
-#         mapped_args = Any[]
-#         for a in arg_nodes
-#             if a isa Symbol
-#                 s = string(a)
-#                 if s == "_"
-#                     push!(mapped_args, :(GeoGebra.construction_protocol()[end]))
-#                     continue
-#                 elseif s == "__"
-#                     push!(mapped_args, :(GeoGebra.construction_protocol()[end-1]))
-#                     continue
-#                 elseif startswith(s, "_") && length(s) > 1
-#                     numstr = s[2:end]
-#                     if all(isdigit, collect(numstr))
-#                         idx = parse(Int, numstr)
-#                         push!(mapped_args, Expr(:ref, :(GeoGebra.construction_protocol()), idx))
-#                         continue
-#                     end
-#                 end
-#             end
-#             push!(mapped_args, a)
-#         end
-
-#         esc_args = Any[]
-#         for a in mapped_args
-#             push!(esc_args, esc(a))
-#         end
-#         args_tuple = Expr(:tuple, esc_args...)
-
-#         call_expr = Expr(:call, Expr(:call, :getfield, :(GeoGebra), QuoteNode(:send_command_eval)), QuoteNode(name), args_tuple)
-
-#         return esc(:(let _res = $(call_expr)
-#                         _proc = GeoGebra.process_labels_response(_res)
-#                         try
-#                             GeoGebra._push_construction_result!(_proc)
-#                         catch
-#                         end
-#                         _proc
-#                      end))
-#     else
-#         # Fallback: reproduce original static walk -> command string behavior
-#         # Special-case assignment forms like `:m = expr` where the left
-#         # side is a quoted label or symbol. Attempt to convert the RHS
-#         # via `sympy_to_ggb` at runtime and, if successful, send a
-#         # GeoGebra assignment using the converted string.
-#         if expr isa Expr && expr.head == :(=) && length(expr.args) >= 2
-#             left = expr.args[1]
-#             right = expr.args[2]
-#             lbl = nothing
-#             if left isa QuoteNode
-#                 if isa(left.value, Symbol)
-#                     lbl = string(left.value)
-#                 elseif isa(left.value, String)
-#                     lbl = left.value
-#                 end
-#             elseif left isa Symbol
-#                 lbl = string(left)
-#             end
-#             if lbl !== nothing
-#                 # If RHS is a bare symbol, evaluate it in caller scope and
-#                 # attempt sympy conversion. For call-exprs or complex
-#                 # expressions, avoid evaluating (may error if symbols like
-#                 # `Circle` are undefined) — instead send the expression as-is.
-#                 if right isa Symbol || right isa QuoteNode
-#                     tmp_sym = gensym("_ggb")
-#                     q = QuoteNode(isa(right, Symbol) ? Symbol(right) : (isa(right, QuoteNode) && isa(right.value, Symbol) ? right.value : right))
-#                     body = :(let $(tmp_sym) = Core.eval($(QuoteNode(__module__)), $(q))
-#                                 _conv = try GeoGebra.sympy_to_ggb($(tmp_sym)) catch; nothing end
-#                                 if isa(_conv, String)
-#                                     _res = GeoGebra.process_labels_response(GeoGebra.send_command($(QuoteNode(lbl)) * " = " * _conv))
-#                                 else
-#                                     _res = GeoGebra.process_labels_response(GeoGebra.send_command($(QuoteNode(lbl)) * " = " * string($(tmp_sym))))
-#                                 end
-#                                 try
-#                                     GeoGebra._push_construction_result!(_res)
-#                                 catch
-#                                 end
-#                                 _res
-#                              end)
-#                     return esc(body)
-#                 else
-#                     # Static stringify the RHS expression (convert Symbols/QuoteNode to plain labels)
-#                     cmd_str = expr_to_cmd_string(right)
-#                     return esc(:(let _cmd = $(QuoteNode(string(lbl * " = " * cmd_str)))
-#                                     _res = GeoGebra.process_labels_response(GeoGebra.send_command(_cmd))
-#                                     try
-#                                         GeoGebra._push_construction_result!(_res)
-#                                     catch
-#                                     end
-#                                     _res
-#                                  end))
-#                 end
-#             end
-#         end
-#         # BUT: if the expression is an index/array-literal/quoted-index that
-#         # is intended as a construction lookup (e.g. `@ggb[1]`, `@ggb["O"]`),
-#         # handle those forms here to avoid sending them as commands.
-#         if expr isa Expr && (expr.head == :ref || expr.head == :vect)
-#             # Delegate to the macro-level handling by constructing an Expr
-#             # that queries the protocol at runtime.
-#             if expr.head == :vect && length(expr.args) == 1
-#                 lbl = expr.args[1]
-#                 lblstr = isa(lbl, QuoteNode) && isa(lbl.value, String) ? lbl.value : (isa(lbl, Symbol) ? string(lbl) : nothing)
-#                 if lblstr !== nothing
-#                     return esc(:(begin
-#                         ch = GeoGebra.construction_protocol()
-#                         lbls = [g for g in ch if g.label == $(QuoteNode(lblstr))]
-#                         isempty(lbls) ? lbls : lbls[end]
-#                     end))
-#                 end
-#             elseif expr.head == :ref
-#                 args_ref = expr.args
-#                 if length(args_ref) == 0
-#                     return esc(:(GeoGebra.construction_protocol()))
-#                 elseif length(args_ref) == 1
-#                     idx_node = args_ref[1]
-#                     lbl = isa(idx_node, QuoteNode) && isa(idx_node.value, String) ? idx_node.value : (isa(idx_node, Symbol) ? string(idx_node) : nothing)
-#                     if lbl !== nothing
-#                         return esc(:(begin
-#                             ch = GeoGebra.construction_protocol()
-#                                 lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
-#                                 isempty(lbls) ? lbls : lbls[end]
-#                         end))
-#                     else
-#                         # non-label single-ref form: fall through to command fallback
-#                     end
-#                 elseif length(args_ref) == 2
-#                     # form like construction[idx]
-#                     idx_node = args_ref[2]
-#                     lbl = isa(idx_node, QuoteNode) && isa(idx_node.value, String) ? idx_node.value : (isa(idx_node, Symbol) ? string(idx_node) : nothing)
-#                     if lbl !== nothing
-#                         return esc(:(begin
-#                             ch = GeoGebra.construction_protocol()
-#                             lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
-#                             isempty(lbls) ? lbls : lbls[end]
-#                         end))
-#                     else
-#                         # non-label two-arg ref: fall through to command fallback
-#                     end
-#                 end
-#             end
-#         end
-#         # Also handle QuoteNode forms like QuoteNode("[1]") which can appear
-#         # in macroexpand output; treat strings of the form "[n]" or "[\"O\"]".
-#         if expr isa QuoteNode && isa(expr.value, String)
-#             s = expr.value
-#             mnum = match(r"^\[(\-?\d+)\]$", s)
-#             if mnum !== nothing
-#                 idx = parse(Int, mnum.captures[1])
-#                 return esc(:(let ch = GeoGebra.construction_protocol()
-#                                 if idx == 0
-#                                     throw(BoundsError("index 0 invalid"))
-#                                 elseif idx > 0
-#                                     ch[$(idx)]
-#                                 else
-#                                     ch[end + $(idx) + 1]
-#                                 end
-#                              end))
-#             end
-#             mstr = match(r"^\[\"(.+)\"\]$", s)
-#             if mstr !== nothing
-#                 lbl = mstr.captures[1]
-#                     return esc(:(begin
-#                         ch = GeoGebra.construction_protocol()
-#                         lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
-#                         isempty(lbls) ? lbls : lbls[end]
-#                     end))
-#             end
-#         end
-#         function walk(ex, depth=0)
-#             block = nothing
-#             indent = repeat(" ", depth)
-#             if ex isa Expr
-#                 block = Expr(ex.head)
-#                 for arg in ex.args
-#                     push!(block.args, walk(arg, depth + 1))
-#                 end
-#                 return block
-#             elseif ex isa Symbol
-#                 if isdefined(__module__, Symbol(ex))
-#                     v = getfield(__module__, Symbol(ex))
-#                     return isa(v, GGBObject) ? Symbol(v.label) : ex
-#                 else
-#                     return ex
-#                 end
-#             elseif ex isa QuoteNode
-#                 return ex.value
-#             else
-#                 return ex
-#             end
-#         end
-#         cmd_str = string(walk(expr))
-#         return esc(:(let _cmd = $(QuoteNode(cmd_str))
-#                         _res = GeoGebra.process_labels_response(GeoGebra.send_command(_cmd))
-#                         try
-#                             GeoGebra._push_construction_result!(_res)
-#                         catch
-#                         end
-#                         _res
-#                      end))
-#     end
-# end
-
-# macro ggblab(args...)
-#     toks = args
-    
-#     # Helper: normalize a token to String when possible (Symbol, QuoteNode(:sym), or String)
-#     function _tok_to_str(tok)
-#         if isa(tok, QuoteNode) && isa(tok.value, Symbol)
-#             return string(tok.value)
-#         elseif isa(tok, Symbol)
-#             return string(tok)
-#         elseif isa(tok, String)
-#             return tok
-#         else
-#             return nothing
-#         end
-#     end
-#     # If the macro was expanded with a leading LineNumberNode, the layout is
-#     # typically: (LineNumberNode, Module, expr...). Drop the first two in that case.
-#     if length(toks) >= 2 && toks[1] isa LineNumberNode
-#         toks = toks[3:end]
-#     elseif length(toks) >= 1 && toks[1] isa Module
-#         # Some callsites include just the Module as the first token; drop it.
-#         toks = toks[2:end]
-#     end
-
-#     # Special-case: handle call-form label lookup like `@ggblab :const(:O)`
-#     # Treat `:const(:O)` as a label lookup (equivalent to @ggb["O"]) so that
-#     # bracket-based indexing remains dedicated to slice/index forms.
-#     if length(toks) >= 2
-#         f = toks[1]
-#         s = toks[2]
-#         # Get a safe string representation for the first token (f).
-#         fstr = _tok_to_str(f)
-#         if fstr === nothing
-#             try
-#                 fstr = string(f)
-#             catch
-#                 fstr = ""
-#             end
-#         end
-#         # Consider it a `construction` shorthand if the token text contains "cons".
-#         if !isempty(fstr) && occursin("cons", lowercase(fstr)) && s isa Expr && s.head == :call && length(s.args) >= 1
-#             arg = s.args[1]
-#             lbl = _tok_to_str(arg)
-#             if lbl === nothing
-#                 try
-#                     lbl = string(arg)
-#                 catch
-#                     lbl = nothing
-#                 end
-#             end
-#                 if lbl !== nothing
-#                 return esc(:(begin ch = GeoGebra.construction_protocol(); lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]; isempty(lbls) ? lbls : lbls[end] end))
-#             end
-#         end
-#     end
-#     if length(toks) == 1
-#         ex = toks[1]
-#         # If macro invoked as a single bare symbol like `@ggb m`, evaluate
-#         # the variable at runtime and attempt to convert via
-#         # `sympy_to_ggb`. If conversion yields a string, send an
-#         # assignment `m = {{...}}` to GeoGebra; otherwise send the
-#         # stringified value.
-#         if ex isa Symbol
-#             lbl = string(ex)
-#             tmp_sym = gensym("_ggb")
-#             # Fetch caller-module global named `ex` (works for REPL/global variables)
-#             body = :(let $(tmp_sym) = Core.eval($(QuoteNode(__module__)), $(QuoteNode(Symbol(ex))))
-#                         _conv = try GeoGebra.sympy_to_ggb($(tmp_sym)) catch; nothing end
-#                         if isa(_conv, String)
-#                             _res = GeoGebra.process_labels_response(GeoGebra.send_command($(QuoteNode(lbl)) * " = " * _conv))
-#                         else
-#                             _res = GeoGebra.process_labels_response(GeoGebra.send_command(string($(tmp_sym))))
-#                         end
-#                         try
-#                             GeoGebra._push_construction_result!(_res)
-#                         catch
-#                         end
-#                         _res
-#                      end)
-#             return esc(body)
-#         end
-#         # Handle call-form provided as a single token: e.g. `@ggb :const(:O)`
-#         if ex isa Expr && ex.head == :call && length(ex.args) >= 2
-#             fn = ex.args[1]
-#             fnstr = _tok_to_str(fn)
-#             if fnstr === nothing
-#                 try
-#                     fnstr = string(fn)
-#                 catch
-#                     fnstr = nothing
-#                 end
-#             end
-#             if fnstr !== nothing && startswith(fnstr, "cons")
-#                 # extract inner arg which may be Symbol, QuoteNode, or Expr
-#                 arg = ex.args[2]
-#                 if arg isa Expr && length(arg.args) >= 1
-#                     cand = arg.args[1]
-#                 else
-#                     cand = arg
-#                 end
-#                 lbl = _tok_to_str(cand)
-#                 if lbl === nothing
-#                     try
-#                         lbl = string(cand)
-#                     catch
-#                         lbl = nothing
-#                     end
-#                 end
-#                 if lbl !== nothing && lbl != ":" && lbl != "end"
-#                     return esc(:(begin ch = GeoGebra.construction_protocol(); lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]; isempty(lbls) ? lbls : lbls[end] end))
-#                 end
-#             end
-#         end
-#         # Early-handle common indexed/quoted forms so they are treated as
-#         # construction lookups instead of falling through to command send.
-#         # numeric indexing intentionally unsupported here; fall through
-#         if ex isa QuoteNode && isa(ex.value, String)
-#             s = ex.value
-#             # Only support string label forms like ["O"] here
-#             mstr = match(r"^\s*\[\s*\"(.+)\"\s*\]\s*$", s)
-#                 if mstr !== nothing
-#                 lbl = mstr.captures[1]
-#                 return esc(:(begin ch = GeoGebra.construction_protocol(); lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]; isempty(lbls) ? lbls : lbls[end] end))
-#             end
-#         end
-#         if ex isa Expr && ex.head == :vect && length(ex.args) == 1
-#             # single-element vector literal: treat as label lookup when possible
-#             lbl = _tok_to_str(ex.args[1])
-#             if lbl !== nothing
-#                 return esc(:(begin ch = GeoGebra.construction_protocol(); lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]; isempty(lbls) ? lbls : lbls[end] end))
-#             end
-#         end
-#     end
-#     # Support special construction inspection syntax:
-#     # - `@ggblab construction` -> returns the full construction history
-#     # - `@ggblab construction[n]` -> returns the nth entry from history
-#     if length(toks) >= 1
-#         first = toks[1]
-#         is_cons_str = s -> (isa(s, String) && length(s) >= 4 && startswith(s, "cons"))
-#         # Shortcut commands under the `:const` namespace, e.g.:
-#         # - `@ggb :const :new`  -> start a new construction (clears history)
-#         # - `@ggb :const :undo` -> undo last construction entry (returns nothing)
-#         fstr_top = _tok_to_str(first)
-#         if fstr_top !== nothing && is_cons_str(fstr_top) && length(toks) >= 2
-#             snd = toks[2]
-#             sndstr = _tok_to_str(snd)
-#             if sndstr === "new"
-#                 # Call the module function which itself invokes the bridge API.
-#                 return esc(:(GeoGebra.new_construction!()))
-#             elseif sndstr === "undo"
-#                 return esc(:(let ch = GeoGebra.construction_protocol(); if !isempty(ch)
-#                                     g = pop!(ch)
-#                                     try
-#                                         GeoGebra.send_function("deleteObject", g.label)
-#                                     catch
-#                                     end
-#                                 end; nothing end))
-#             end
-#         end
-#         # Support `@ggb :listen :O` shorthand: send a listen request and
-#         # return the object's observable for downstream consumers.
-#         if fstr_top !== nothing && lowercase(fstr_top) == "listen" && length(toks) >= 2
-#             snd = toks[2]
-#             lbl = _tok_to_str(snd)
-#             if lbl === nothing
-#                 try
-#                     lbl = string(snd)
-#                 catch
-#                     lbl = nothing
-#                 end
-#             end
-#             if lbl !== nothing
-#                 return esc(:(begin
-#                     GeoGebra.send_listen($(QuoteNode(lbl)); enabled=true)
-#                     GeoGebra.get_object_observable($(QuoteNode(lbl)))
-#                 end))
-#             end
-#         end
-#         # Support `@ggb :unlisten :O` shorthand: send a listen request with
-#         # enabled=false to stop listening for updates for the object.
-#         if fstr_top !== nothing && lowercase(fstr_top) == "unlisten" && length(toks) >= 2
-#             snd = toks[2]
-#             lbl = _tok_to_str(snd)
-#             if lbl === nothing
-#                 try
-#                     lbl = string(snd)
-#                 catch
-#                     lbl = nothing
-#                 end
-#             end
-#             if lbl !== nothing
-#                 return esc(:(begin
-#                     GeoGebra.send_listen($(QuoteNode(lbl)); enabled=false)
-#                     nothing
-#                 end))
-#             end
-#         end
-#         if first isa Expr && first.head == :vect
-#             # Handle array-literal form like @ggb["O"] where the macro sees
-#             # an Expr(:vect, elem...). If single-element and the element is a
-#             # string/symbol/quoted symbol, treat as label lookup into construction.
-#             elems = first.args
-#             if length(elems) == 1
-#                 lbl = _tok_to_str(elems[1])
-#                 if lbl !== nothing
-#                     expr = :(begin
-#                         ch = GeoGebra.construction_protocol()
-#                         lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
-#                         isempty(lbls) ? lbls : lbls[end]
-#                     end)
-#                     return esc(expr)
-#                 end
-#             end
-#         end
-
-#         if first isa Expr && first.head == :ref
-#             args_ref = first.args
-#             # Case 0: empty index -> return all construction entries
-#             if length(args_ref) == 0
-#                 return esc(:(GeoGebra.construction_protocol()))
-#             end
-#             # Case A: form like `construction[idx]` (two-arg ref)
-#             if length(args_ref) == 2
-#                 headsym = args_ref[1]
-#                 hstr = _tok_to_str(headsym)
-#                 if is_cons_str(hstr)
-#                     idx_node = args_ref[2]
-#                     # If the index node is a parenthesized/call form like `(:O)`
-#                     # or `:const(:O)`, extract the inner token and treat it as a
-#                     # label lookup. Otherwise fall back to direct token-to-string.
-#                     if idx_node isa Expr && (idx_node.head == :call || idx_node.head == :paren) && length(idx_node.args) >= 1
-#                         lbl = _tok_to_str(idx_node.args[1])
-#                     else
-#                         lbl = _tok_to_str(idx_node)
-#                     end
-#                     if lbl !== nothing && lbl != ":" && lbl != "end"
-#                         expr = :(begin
-#                             ch = GeoGebra.construction_protocol()
-#                             lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
-#                             isempty(lbls) ? lbls : lbls[end]
-#                         end)
-#                         return esc(expr)
-#                     else
-#                         # Simplified support: accept full-slice `:`/`[:]`, `[end]`,
-#                         # or a positive integer index like `1` or `[1]`.
-#                         # Handle various parser node shapes for slice/index forms
-#                         # Prefer structural checks when possible (Expr/Symbol),
-#                         # falling back to string-matching for QuoteNode/text forms.
-#                         if isa(idx_node, Expr)
-#                             # vector literal form like `[:]' or `[:]' -> Expr(:vect, ...)
-#                             if idx_node.head == :vect && length(idx_node.args) == 1
-#                                 e = idx_node.args[1]
-#                                 if isa(e, Symbol) && string(e) == ":"
-#                                     return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
-#                                 elseif isa(e, Symbol) && string(e) == "end"
-#                                     return esc(:(let ch = GeoGebra.construction_protocol(); g = ch[end]; (length(ch), g.label, GeoGebra.send_function("getCommandString", g.label)) end))
-#                                 end
-#                             end
-#                             # direct colon expression (rare) -> treat as full slice
-#                             if idx_node.head == :colon
-#                                 return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
-#                             end
-#                         end
-#                         s = isa(idx_node, QuoteNode) && isa(idx_node.value, String) ? idx_node.value : string(idx_node)
-#                         # Full-slice forms -> return all tuples
-#                         if strip(s) == ":" || match(r"^\s*\[\s*:\s*\]\s*$", s) !== nothing
-#                             return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
-#                         end
-#                         # [end]
-#                         if match(r"^\s*\[?\s*end\s*\]?\s*$", s) !== nothing
-#                             return esc(:(let ch = GeoGebra.construction_protocol(); g = ch[end]; (length(ch), g.label, GeoGebra.send_function("getCommandString", g.label)) end))
-#                         end
-#                         # Positive integer index fallback like "1" or "[1]"
-#                         m = match(r"^\s*\[?\s*(\d+)\s*\]?\s*$", s)
-#                         if m !== nothing
-#                             numstr = m.captures[1]
-#                             return esc(:(let ch = GeoGebra.construction_protocol();
-#                                             idx = parse(Int, $(QuoteNode(numstr)));
-#                                             if idx == 0
-#                                                 throw(BoundsError("index 0 invalid"))
-#                                             end
-#                                             g = ch[idx]
-#                                             (idx, g.label, GeoGebra.send_function("getCommandString", g.label))
-#                                          end))
-#                         end
-#                         # non-label two-arg ref: fall through to command fallback
-#                     end
-#                 end
-#             # Case B: form like `@ggb[idx]` (single-arg ref) — treat as construction lookup
-#             elseif length(args_ref) == 1
-#                 idx_node = args_ref[1]
-#                 lbl = _tok_to_str(idx_node)
-#                 if lbl !== nothing
-#                     expr = :(begin
-#                         ch = GeoGebra.construction_protocol()
-#                         lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
-#                         isempty(lbls) ? lbls : lbls[end]
-#                     end)
-#                     return esc(expr)
-#                 else
-#                     # non-label single-ref: fall through to command fallback
-#                 end
-#             end
-#         else
-#             fstr = _tok_to_str(first)
-#             if is_cons_str(fstr)
-#                 return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
-#             end
-#         end
-#     end
-#     ex = nothing
-#     if length(toks) == 1
-#         ex = toks[1]
-#         # Additional handling: if macro is invoked with a bare index form like
-#         # `@ggb[1]` the parser may present the index as various node types
-#         # (Integer, QuoteNode("[1]"), Expr(:vect,...)). Normalize common
-#         # cases here so they are treated as construction lookups rather than
-#         # falling back to sending a command string.
-#         # Normalize single-token vector forms (label lookup). Numeric bare-index
-#         # forms (e.g. @ggb[1]) are intentionally not supported and will fall
-#         # through to the command fallback — this keeps behavior consistent
-#         # with @ggb[:O] / @ggb["O"] label lookups which are supported above.
-#         if ex isa Expr && ex.head == :vect
-#             elems = ex.args
-#             if length(elems) == 1
-#                 lbl = _tok_to_str(elems[1])
-#                 if lbl !== nothing
-#                         return esc(:((begin
-#                         ch = GeoGebra.construction_protocol()
-#                         lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
-#                         isempty(lbls) ? lbls : lbls[end]
-#                     end)))
-#                 end
-#             end
-#         end
-#     else
-#         tokstr = _tok_to_str(toks[1])
-#         if tokstr == "api"
-#             if length(toks) < 2
-#                 error("@ggblab api usage must be like `@ggblab api fn(args...)`")
-#             end
-#             ex = Expr(:call, :api, toks[2])
-#         else
-#             head = toks[1]
-#             args_rest = toks[2:end]
-#             ex = Expr(:call, head, args_rest...)
-#         end
-#     end
-
-#     if ex isa Expr && ex.head == :call && ex.args !== nothing && length(ex.args) >= 1 && ex.args[1] == :api
-#         inner = ex.args[2]
-#         return Expr(:macrocall, Symbol("@ggblab_function"), __source__, inner)
-#     end
-
-#     # Delegate non-API branch to the module-qualified `@ggblab_command` macro
-#     return Expr(:macrocall, Symbol("@ggblab_command"), __source__, ex)
-# end
-
-
-# # Alias `@ggb` to `@ggblab` for convenience
-# # const var"@ggb" = var"@ggblab"
-
-# @eval const $(Symbol("@ggb")) = $(Symbol("@ggblab"))
-
-# # macro ggb(args...)
-# #     return esc(Expr(:macrocall, Symbol("@ggblab"), args...))
-# # end
-
-# """Run a Python coroutine (PythonCall.PyObject) with asyncio.run.
-
-# Usage:
-# ```
-# # obtain a coroutine object, e.g. via `py"coro()"` or `pyeval("coro()")`
-# # coro = py"coro()"
-# result = @await coro
-# ```
-# """
-# macro await(expr)
-#     return :(let _asyncio = PythonCall.pyimport("asyncio")
-#                 _coro = $(esc(expr))
-#                 _asyncio.run(_coro)
-#              end)
-# end
-
 
 
 export request, poll_reply, request_with_retry, set_default_host, set_default_port, send_command, send_function, send_command_eval, send_function_eval, sympy_to_ggb, fetch_object, refresh, refresh!, GGBObject, set_object!, set!, construction_protocol, new_construction!, evalXML_from_element, @ggblab, @ggb, @ggblab_command, @ggblab_function, @await, OOBClient
