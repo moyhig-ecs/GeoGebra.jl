@@ -7,6 +7,8 @@ try
 catch
     # Fail silently; OOBClient is optional in some contexts
 end
+# Export the optional OOBClient module when available
+export OOBClient
 
 # comm bridge and transport switching helpers are included after defaults
 
@@ -381,11 +383,21 @@ function set_default_port(p::Integer)
     return DEFAULT_PORT
 end
 
-include("ggb_object.jl")
-include("ggb_helpers.jl")
+# Export core public API: request/send/poll helpers and defaults
+# export request, poll_reply, request_with_retry, 
+export set_default_host, set_default_port, send_command, send_function, send_listen
+# export send_command_eval, send_function_eval
+
+include("ggb_construction.jl")
+# Exports for symbols provided by ggb_construction.jl
+export construction_protocol, new_construction!
+# export evalXML_from_element, process_labels_response
+export GGBObject, set_object!, set!, fetch_object, refresh, refresh!
+include("ggb_sympy.jl")
+# Exports for helper utilities
+export sympy_to_ggb, expr_to_cmd_string
 include("ggb_macros.jl")
-
-
-export request, poll_reply, request_with_retry, set_default_host, set_default_port, send_command, send_function, send_command_eval, send_function_eval, sympy_to_ggb, fetch_object, refresh, refresh!, GGBObject, set_object!, set!, construction_protocol, new_construction!, evalXML_from_element, @ggblab, @ggb, @ggblab_command, @ggblab_function, @await, OOBClient
+# Exports for macros (defined in ggb_macros.jl) and their helpers
+export @ggblab, @ggb, @ggblab_command, @ggblab_function, @await
 
 end # module
