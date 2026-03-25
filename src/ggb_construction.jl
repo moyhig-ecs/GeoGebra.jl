@@ -1,4 +1,22 @@
-# Lightweight wrapper for objects created in the GeoGebra applet.
+"""Utilities for representing and managing objects created in the
+GeoGebra applet and a simple in-memory construction protocol.
+
+This file provides the `GGBObject` container type, a construction
+protocol storage, and helpers to fetch, refresh, serialize and send
+elements back to the applet. Functions here are designed to be
+lightweight wrappers around the Python/GeoGebra bridge used by the
+package.
+"""
+
+"""A lightweight wrapper for objects created in the GeoGebra applet.
+
+Fields
+- `label::String`: the GeoGebra-assigned object label (e.g. "A", "p1").
+- `data::Any`: decoded object data (typically a Python dict via PythonCall).
+
+`GGBObject` is used throughout the package to represent and update
+objects fetched from or sent to the applet.
+"""
 mutable struct GGBObject
     label::String
     data::Any
