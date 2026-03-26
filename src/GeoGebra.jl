@@ -1,17 +1,16 @@
 module GeoGebra
 
-# Include package-local OOBClient implementation and expose it from this package
-try
-    include("OOBClient.jl")
-    using .OOBClient
-catch
-    # Fail silently; OOBClient is optional in some contexts
-end
-# Export the optional OOBClient module when available
-export OOBClient
+# # Include package-local OOBClient implementation and expose it from this package
+# try
+#     include("comm_bridge/OOBClient.jl")
+#     using .OOBClient
+# catch
+#     # Fail silently; OOBClient is optional in some contexts
+# end
+# # Export the optional OOBClient module when available
+# export OOBClient
 
-# comm bridge and transport switching helpers are included after defaults
-
+# # comm bridge and transport switching helpers are included after defaults
 
 """Simple TCP JSON bridge client for use from Julia (IJulia/PyCall testing).
 
@@ -43,7 +42,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
 # Include comm bridge and transport switching helpers now that defaults exist
-include("comm_bridge.jl")
+include("comm_bridge/CommBridge.jl")
 using .CommBridge
 export CommBridge
 
