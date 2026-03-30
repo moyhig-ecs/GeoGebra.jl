@@ -115,9 +115,8 @@ end
 
 # Revert to TCP bridge transport by default. Direct comm transport can
 # be enabled explicitly via `enable_direct_transport!()` when desired.
-# Commented out to prefer the kernel-side direct comm transport by default.
-# disable_direct_transport!()
-enable_direct_transport!()
+disable_direct_transport!()
+# enable_direct_transport!()
 
 # Install an asynchronous comm receive handler that updates the local
 # construction protocol when the frontend notifies about created objects
