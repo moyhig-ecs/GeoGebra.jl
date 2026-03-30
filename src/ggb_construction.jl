@@ -36,6 +36,20 @@ function construction_protocol()
     return _CONSRUCTION_PROTOCOL[]
 end
 
+# Normalize lowercase scientific 'e' to uppercase 'E' in numeric literals.
+# GeoGebra can emit numbers like "3.67e-16" which may not match XML
+# schema patterns that expect 'E'. This helper performs a conservative
+# regex replacement to convert the exponent marker.
+function _normalize_exponent(xml::AbstractString)
+    try
+        return replace(xml, r"(?<=\d)e(?=[+-]?\d+)" => "E")
+    catch
+        return xml
+    end
+end
+
+_normalize_exponent(x) = x
+
 """Start a new construction by clearing the construction history in-place
 and return the cleared vector. Named `new_construction!` to mirror the
 GeoGebra API `newConstruction()`.
@@ -160,28 +174,49 @@ end
 `ggblab.schema.decode` function. Returns a `GGBObject`.
 """
 function fetch_object(label::AbstractString)
+    # Defensive synchronous fetch: prefer TCP bridge to avoid re-entering
+    # kernel-side comm handlers; add guards for pathological XML and
+    # handle decode failures gracefully by returning a placeholder
+    lbl = string(label)
     xml_str = ""
     try
-        xml_str = send_function("getXML", string(label); host=DEFAULT_HOST, port=DEFAULT_PORT)
+        t = @async send_function("getXML", lbl; host=DEFAULT_HOST, port=DEFAULT_PORT)
+        xml_str = fetch(t)
     catch e
-        throw(ErrorException("Failed to get XML for label $(label): $(e)"))
+        @warn "fetch_object: failed to fetch XML" label=lbl err=e
+        pdata = Dict("__fetch_failed__" => true, "error" => string(e))
+        return GGBObject(lbl, pdata)
     end
+
     try
-        # Use the ggblab.schema entrypoint for decode to ensure we call
-        # the correct wrapper object: ggb_schema().schema
-        ggb_schema = PythonCall.pyimport("ggblab.schema").ggb_schema()
-        schema = ggb_schema.schema
+        xml_str = _normalize_exponent(xml_str)
         s = strip(xml_str)
-        if startswith(s, "<construction")
-            xml_to_decode = s
-        else
-            # wrap in a single root to handle multi-root responses
-            xml_to_decode = "<construction>" * s * "</construction>"
+        xml_to_decode = startswith(s, "<construction") ? s : "<construction>" * s * "</construction>"
+        xml_to_decode = _normalize_exponent(xml_to_decode)
+
+        # Decode using Python-side schema; catch stack overflows and other errors
+        try
+            ggb_schema = PythonCall.pyimport("ggblab.schema").ggb_schema()
+            schema = ggb_schema.schema
+            pydict = schema.decode(xml_to_decode)
+            return GGBObject(lbl, pydict)
+        catch err_decode
+            msg = string(err_decode)
+            if err_decode isa StackOverflowError || occursin("StackOverflowError", msg)
+                @warn "fetch_object: StackOverflowError during decode" label=lbl err=msg
+                truncated = length(xml_to_decode) > 4096 ? first(xml_to_decode, 4096) * "..." : xml_to_decode
+                pdata = Dict("__decode_failed__" => true, "raw_xml_truncated" => string(truncated), "error_message" => msg)
+                return GGBObject(lbl, pdata)
+            else
+                @warn "fetch_object: decode error" label=lbl err=err_decode
+                pdata = Dict("__decode_failed__" => true, "error_message" => string(err_decode))
+                return GGBObject(lbl, pdata)
+            end
         end
-        pydict = schema.decode(xml_to_decode)
-        return GGBObject(string(label), pydict)
     catch e
-        throw(ErrorException("Failed to decode XML for label $(label): $(e)"))
+        @warn "fetch_object: unexpected error during decode prep" label=lbl err=e
+        pdata = Dict("__decode_failed__" => true, "error_message" => string(e))
+        return GGBObject(lbl, pdata)
     end
 end
 
@@ -248,4 +283,27 @@ end
 
 # `refresh_all_objects!` removed — it did not behave as expected. Use
 # `fetch_object` / `refresh!` individually as needed.
+
+
+"""Return the most-recent `GGBObject` in the construction protocol
+matching `label`, or `nothing` if no such object exists.
+
+Example:
+```
+# returns GGBObject or nothing
+obj = get_construction_object("A")
+```
+"""
+function get_construction_object(label::AbstractString)
+    ch = _CONSRUCTION_PROTOCOL[]
+    matches = [g for g in ch if string(g.label) == string(label)]
+    return isempty(matches) ? nothing : matches[end]
+end
+
+"""Return all `GGBObject`s in the construction protocol matching `label`.
+Returns an empty vector when none match."""
+function get_construction_objects(label::AbstractString)
+    ch = _CONSRUCTION_PROTOCOL[]
+    return [g for g in ch if string(g.label) == string(label)]
+end
 
