@@ -92,7 +92,7 @@ function _enqueue_comm_message(key::String, data::String)
     try
         # Ensure queue exists
         if !haskey(COMM_QUEUES, key)
-            COMM_QUEUES[key] = Channel{String}(64)
+            COMM_QUEUES[key] = Channel{String}(1024)
         end
         ch = COMM_QUEUES[key]
 
@@ -181,10 +181,10 @@ function _enqueue_comm_message(key::String, data::String)
                     end
 
                     # otherwise enqueue the single item string
-                    try
+                    @async try
                         put!(ch, s_item)
                     catch err_put2
-                        @warn "comm_direct: failed to enqueue bulk item" err=err_put2
+                        @warn "comm_direct: async failed to enqueue bulk item" err=err_put2
                     end
                 end
                 @debug "comm_direct: enqueued bulk_actions items" key=key
@@ -280,11 +280,24 @@ end
 
 function _dequeue_comm_message(key::String; timeout::Real=COMM_REPLY_TIMEOUT)
     if !haskey(COMM_QUEUES, key)
-        COMM_QUEUES[key] = Channel{String}(64)
+        COMM_QUEUES[key] = Channel{String}(1024)
     end
     ch = COMM_QUEUES[key]
     t0 = time()
     @debug "comm_direct: dequeue wait start" key=key start=t0 timeout=timeout
+    # defensive throw: ensure this waiting task is interrupted if it stalls
+    t_self = current_task()
+    timer = @async begin
+        sleep(timeout + 0.1)
+        if !istaskdone(t_self)
+            try
+                @debug "comm_direct: defensive timer firing (dequeue)" key=key at=time()
+                Base.throwto(t_self, ErrorException("comm_direct: forced timeout in _dequeue_comm_message waiting for $key"))
+            catch err_throw
+                @warn "comm_direct: throwto failed in _dequeue_comm_message" err=err_throw key=key
+            end
+        end
+    end
     while true
         if isready(ch)
             @debug "comm_direct: dequeue success" key=key at=time() waited=(time() - t0)
@@ -305,6 +318,19 @@ function _wait_on_pending(id::String; timeout::Real=COMM_REPLY_TIMEOUT)
     ch = PENDING_REPLIES[id]
     t0 = time()
         @debug "comm_direct: awaiting reply" req_id=id keys_pending=collect(keys(PENDING_REPLIES))
+    # defensive throw: ensure this waiting task is interrupted if it stalls
+    t_self = current_task()
+    timer = @async begin
+        sleep(timeout + 0.1)
+        if !istaskdone(t_self)
+            try
+                @debug "comm_direct: defensive timer firing (wait_on_pending)" req_id=id at=time()
+                Base.throwto(t_self, ErrorException("comm_direct: forced timeout in _wait_on_pending waiting for $id"))
+            catch err_throw
+                @warn "comm_direct: throwto failed in _wait_on_pending" err=err_throw req_id=id
+            end
+        end
+    end
         while true
         # First, check whether the reply has already been enqueued in any
         # comm queue while the kernel was busy. If so, deliver it immediately.
@@ -508,8 +534,18 @@ function send_and_wait_for_id(key::String, payload; timeout::Real=COMM_REPLY_TIM
     end
 
     # wait for matching reply in a background task so comm callbacks can run
-    t = @async begin
-        return _wait_on_pending(rid; timeout=timeout)
+    t = @async _wait_on_pending(rid; timeout=timeout)
+    # defensive timer: if the waiting task stalls (due to unexpected blocking),
+    # force an exception into it so the caller can observe a timeout.
+    timer = @async begin
+        sleep(timeout + 0.1)
+        if !istaskdone(t)
+            try
+                Base.throwto(t, ErrorException("comm_direct: forced timeout waiting for req_id $rid"))
+            catch err_throw
+                @warn "comm_direct: throwto failed" err=err_throw req_id=rid
+            end
+        end
     end
     wait(t)
     return fetch(t)
@@ -522,7 +558,7 @@ end
 
 function _ensure_observer_queue(key::String)
     if !haskey(OBSERVER_QUEUES, key)
-        OBSERVER_QUEUES[key] = Channel{String}(128)
+        OBSERVER_QUEUES[key] = Channel{String}(1024)
     end
     return OBSERVER_QUEUES[key]
 end
@@ -543,7 +579,7 @@ function add_object_handler(name::AbstractString, fn::Function)
     # Capture and return the ObserverFunction that `on` creates so callers
     # can pass that observer to `remove_object_handler`.
     obs_fn = on(obs) do v
-        try
+        @async try
             fn(v)
         catch e
             @error "object handler error for $(name): $e"
@@ -634,9 +670,10 @@ function _scan_comm_queue_for_reqid(key::String, rid::String)
             if isa(err_take, InterruptException)
                 @debug "comm_direct: scan interrupted by user" key=key err=err_take
                 for ss in buf
-                    try
+                    @async try
                         put!(ch, ss)
-                    catch
+                    catch err_put_async
+                        @warn "comm_direct: async requeue failed (interrupt)" err=err_put_async key=key
                     end
                 end
                 return found
@@ -672,7 +709,11 @@ function _scan_comm_queue_for_reqid(key::String, rid::String)
                             # forward object_update items to observer queue
                             if isa(item, AbstractDict) && get(item, "type", "") == "object_update"
                                 q = _ensure_observer_queue(key)
-                                put!(q, JSON.json(item))
+                                @async try
+                                    put!(q, JSON.json(item))
+                                catch err_put_async
+                                    @warn "comm_direct: async put to observer failed (scan)" err=err_put_async
+                                end
                                 # update/create object observable
                                 try
                                     pl = get(item, "payload", nothing)
@@ -713,7 +754,11 @@ function _scan_comm_queue_for_reqid(key::String, rid::String)
                 # forward object_update top-level messages to observer queue
                 if !handled && get(parsed, "type", "") == "object_update"
                     q = _ensure_observer_queue(key)
-                    put!(q, JSON.json(parsed))
+                                @async try
+                                    put!(q, JSON.json(parsed))
+                                catch err_put_async
+                                    @warn "comm_direct: async put to observer failed (scan)" err=err_put_async
+                                end
                     # update/create object observable
                     try
                         pl = get(parsed, "payload", nothing)
@@ -740,9 +785,10 @@ function _scan_comm_queue_for_reqid(key::String, rid::String)
         if isa(err_outer, InterruptException)
             @debug "comm_direct: scan interrupted by user (outer)" key=key err=err_outer
             for ss in buf
-                try
+                @async try
                     put!(ch, ss)
-                catch
+                catch err_put_async
+                    @warn "comm_direct: async requeue failed (outer)" err=err_put_async key=key
                 end
             end
             return found
@@ -751,8 +797,12 @@ function _scan_comm_queue_for_reqid(key::String, rid::String)
         end
     end
     # re-queue buffered items in original order
-    for s in buf
-        put!(ch, s)
+    for ss in buf
+        @async try
+            put!(ch, ss)
+        catch err_put_async
+            @warn "comm_direct: async requeue failed" err=err_put_async key=key
+        end
     end
     return found
 end
@@ -816,7 +866,11 @@ function peek_comm_queue(key::String)
     end
     # re-queue in same order
     for s in buf
-        put!(ch, s)
+        @async try
+            put!(ch, s)
+        catch err_put_async
+            @warn "comm_direct: async requeue failed (peek)" err=err_put_async key=key
+        end
     end
     return buf
 end
@@ -852,8 +906,16 @@ function send_and_wait_for_next(key::String, payload; timeout::Real=COMM_REPLY_T
     @debug "comm_direct: send_and_wait_for_next sent, waiting for reply" key=key at=time()
     # start background task to dequeue (this task will block on channel but
     # not the caller's task scheduler)
-    t = @async begin
-        return _dequeue_comm_message(key; timeout=timeout)
+    t = @async _dequeue_comm_message(key; timeout=timeout)
+    timer = @async begin
+        sleep(timeout + 0.1)
+        if !istaskdone(t)
+            try
+                Base.throwto(t, ErrorException("comm_direct: forced timeout waiting for next on $key"))
+            catch err_throw
+                @warn "comm_direct: throwto failed" err=err_throw key=key
+            end
+        end
     end
     # wait for task to complete and return its value; `fetch` will rethrow
     # any exception raised inside the task.
@@ -936,8 +998,12 @@ function IJulia.CommManager.register_comm(comm::IJulia.CommManager.Comm{Symbol("
                             catch err_inner
                                 @warn "comm_direct: failed to schedule put to pending channel" err=err_inner rid=rid
                             end
-                            # still call receive handler for side-effects
-                            COMM_RECEIVE_HANDLER[](conn, parsed)
+                            # still call receive handler for side-effects (run async to avoid blocking)
+                            @async try
+                                COMM_RECEIVE_HANDLER[](conn, parsed)
+                            catch err_h
+                                @warn "comm_direct: async handler raised" err=err_h
+                            end
                             return
                         end
                     end
@@ -972,7 +1038,11 @@ function IJulia.CommManager.register_comm(comm::IJulia.CommManager.Comm{Symbol("
             else
                 recv = msg
             end
-            COMM_RECEIVE_HANDLER[](conn, recv)
+            @async try
+                COMM_RECEIVE_HANDLER[](conn, recv)
+            catch err_h
+                @warn "comm_direct: async handler raised" err=err_h
+            end
         catch err
             @warn "comm_direct: handler raised" err=err
         end

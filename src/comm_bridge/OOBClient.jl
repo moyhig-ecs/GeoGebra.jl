@@ -34,7 +34,7 @@ end
 function add_label_handler(label::AbstractString, fn::Function)
     obs = get_label_observable(label)
     unsub = on(obs) do v
-        try
+        @async try
             fn(v)
         catch e
             @error "Label handler error for $(label): $e"
