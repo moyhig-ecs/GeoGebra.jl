@@ -75,6 +75,10 @@ end)
 const COMM_QUEUES = Dict{String, Channel{String}}()
 # Pending per-request reply channels keyed by request id
 const PENDING_REPLIES = Dict{String, Channel{Any}}()
+# Recent label -> req_id map to allow correlating OOB replies that omit req_id
+const LABEL_TO_REQID = Dict{String, Tuple{String, Float64}}()
+# TTL (seconds) for label->req_id entries
+const LABEL_REQID_TTL = 5.0
 # Observer queues for downstream consumers (only object_update messages)
 const OBSERVER_QUEUES = Dict{String, Channel{String}}()
 # Per-object Observables keyed by object name (e.g. payload.name in object_update)
@@ -111,7 +115,6 @@ function _enqueue_comm_message(key::String, data::String)
             end
             push!(SEEN_REPLIES[k], rid)
         end
-
         # If this is a bulk_actions wrapper, split and handle each item
         if isa(parsed, AbstractDict) && haskey(parsed, "type") && string(parsed["type"]) == "bulk_actions"
             pl = get(parsed, "payload", nothing)
@@ -135,12 +138,19 @@ function _enqueue_comm_message(key::String, data::String)
                                             end
                                         catch
                                         end
-                                        put!(PENDING_REPLIES[rid], to_put)
+                                        @async try
+                                            put!(PENDING_REPLIES[rid], to_put)
+                                            @debug "comm_direct: async put bulk reply scheduled" req_id=rid key=key
+                                        catch err_put_async
+                                            @warn "comm_direct: async put to pending reply failed" err=err_put_async req_id=rid
+                                        end
                                         _mark_seen_if_needed(key, rid)
                                     catch err_put
-                                        @warn "comm_direct: failed to put bulk reply to pending" err=err_put req_id=rid
+                                        @warn "comm_direct: failed to schedule bulk reply delivery" err=err_put req_id=rid
                                     end
-                                continue
+                                else
+                                    @debug "comm_direct: no pending reply channel for bulk item" req_id=rid key=key
+                                end
                             end
                         end
                     catch err_inner
@@ -207,12 +217,20 @@ function _enqueue_comm_message(key::String, data::String)
                                     end
                                 catch
                                 end
-                                put!(PENDING_REPLIES[rid], to_put)
+                                @async try
+                                    put!(PENDING_REPLIES[rid], to_put)
+                                    @debug "comm_direct: async put reply scheduled" req_id=rid key=key
+                                catch err_put_async
+                                    @warn "comm_direct: async put to pending reply failed" err=err_put_async req_id=rid
+                                end
                                 _mark_seen_if_needed(key, rid)
                                 return nothing
                             catch err_put
-                                @warn "comm_direct: failed to put reply to pending" err=err_put req_id=rid
+                                @warn "comm_direct: failed to schedule reply delivery" err=err_put req_id=rid
                             end
+                        else
+                            @debug "comm_direct: no pending reply channel for req_id" req_id=rid key=key
+                        end
                     end
                 end
             catch err_inner2
@@ -252,10 +270,11 @@ function _enqueue_comm_message(key::String, data::String)
 
         # Default: enqueue the raw string
         try
-            @debug "comm_direct: enqueued message" key=key time=time()
+            @debug "comm_direct: enqueued message (async)" key=key time=time()
             @debug "comm_direct: comm_queue" queue=COMM_QUEUES[key]
                 @async try
                     put!(ch, data)
+                    @debug "comm_direct: async put to comm queue succeeded" key=key
                 catch err_put_async
                     @warn "comm_direct: async enqueue message failed" err=err_put_async
                 end
@@ -270,6 +289,65 @@ function _enqueue_comm_message(key::String, data::String)
 end
 
 
+function _record_label_reqid(label::AbstractString, req_id::AbstractString)
+    try
+        LABEL_TO_REQID[string(label)] = (string(req_id), time())
+    catch
+    end
+    return nothing
+end
+
+function _find_reqid_by_label(label::AbstractString)
+    try
+        t = get(LABEL_TO_REQID, string(label), nothing)
+        if t === nothing
+            return nothing
+        end
+        rid, ts = t
+        if time() - ts > LABEL_REQID_TTL
+            delete!(LABEL_TO_REQID, string(label))
+            return nothing
+        end
+        # consume mapping once used
+        delete!(LABEL_TO_REQID, string(label))
+        return rid
+    catch
+        return nothing
+    end
+end
+
+function _extract_label_from_parsed(obj)
+    try
+        if isa(obj, AbstractDict)
+            pl = get(obj, "payload", nothing)
+            # payload may be Dict("value" => xmlstring) or a string label
+            if isa(pl, AbstractDict)
+                # check for explicit label key
+                for k in ("label", "name", "id")
+                    if haskey(pl, k) && isa(pl[k], AbstractString)
+                        return string(pl[k])
+                    end
+                end
+                # check for inner 'value' that contains xml with label="..."
+                if haskey(pl, "value") && isa(pl["value"], AbstractString)
+                    m = match(r"label\s*=\s*\"([^\"]+)\"", pl["value"])
+                    if m !== nothing
+                        return m.captures[1]
+                    end
+                end
+            elseif isa(pl, AbstractString)
+                # plain string payload like 'r_1'
+                if occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", pl)
+                    return string(pl)
+                end
+            end
+        end
+    catch
+    end
+    return nothing
+end
+
+
 function _dequeue_comm_message(key::String; timeout::Real=COMM_REPLY_TIMEOUT)
     if !haskey(COMM_QUEUES, key)
         COMM_QUEUES[key] = Channel{String}(64)
@@ -277,15 +355,36 @@ function _dequeue_comm_message(key::String; timeout::Real=COMM_REPLY_TIMEOUT)
     ch = COMM_QUEUES[key]
     t0 = time()
     @debug "comm_direct: dequeue wait start" key=key start=t0 timeout=timeout
+    # Timer channel: a background task will put into this channel after timeout
+    timer_ch = Channel{Bool}(1)
+    @async begin
+        sleep(timeout)
+        try
+            put!(timer_ch, true)
+        catch
+        end
+    end
     while true
         if isready(ch)
             @debug "comm_direct: dequeue success" key=key at=time() waited=(time() - t0)
+            # cancel timer if possible
+            if isready(timer_ch)
+                try
+                    take!(timer_ch)
+                catch
+                end
+            end
             return take!(ch)
-        elseif time() - t0 > timeout
+        elseif isready(timer_ch)
+            # consume timer and raise timeout
+            try
+                take!(timer_ch)
+            catch
+            end
             @debug "comm_direct: dequeue timeout" key=key waited=(time() - t0)
             throw(ErrorException("comm_direct: timeout waiting for reply on comm $key"))
         else
-            sleep(0.01)
+            yield()
         end
     end
 end
@@ -296,8 +395,17 @@ function _wait_on_pending(id::String; timeout::Real=COMM_REPLY_TIMEOUT)
     end
     ch = PENDING_REPLIES[id]
     t0 = time()
-        @debug "comm_direct: awaiting reply" req_id=id keys_pending=collect(keys(PENDING_REPLIES))
-        while true
+    @debug "comm_direct: awaiting reply" req_id=id keys_pending=collect(keys(PENDING_REPLIES))
+    # Timer channel for timeout handling
+    timer_ch = Channel{Bool}(1)
+    @async begin
+        sleep(timeout)
+        try
+            put!(timer_ch, true)
+        catch
+        end
+    end
+    while true
         # First, check whether the reply has already been enqueued in any
         # comm queue while the kernel was busy. If so, deliver it immediately.
         try
@@ -312,13 +420,24 @@ function _wait_on_pending(id::String; timeout::Real=COMM_REPLY_TIMEOUT)
         end
         if isready(ch)
             val = take!(ch)
+            # cancel timer
+            if isready(timer_ch)
+                try
+                    take!(timer_ch)
+                catch
+                end
+            end
             delete!(PENDING_REPLIES, id)
             return val
-        elseif time() - t0 > timeout
+        elseif isready(timer_ch)
+            try
+                take!(timer_ch)
+            catch
+            end
             delete!(PENDING_REPLIES, id)
             throw(ErrorException("comm_direct: timeout waiting for reply for req_id $id"))
         else
-            sleep(0.01)
+            yield()
         end
     end
 end
@@ -474,6 +593,25 @@ function send_and_wait_for_id(key::String, payload; timeout::Real=COMM_REPLY_TIM
     # send
     try
         IJulia.send_comm(c.comm, send_dict)
+        # record any label present in the outgoing payload to allow
+        # correlating OOB replies that omit req_id
+        try
+            # look for label in send_dict.payload
+            pl = get(send_dict, "payload", nothing)
+            if isa(pl, AbstractDict)
+                for k in ("label", "name", "id")
+                    if haskey(pl, k) && isa(pl[k], AbstractString)
+                        _record_label_reqid(string(pl[k]), rid)
+                        break
+                    end
+                end
+            elseif isa(pl, AbstractString)
+                if occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", pl)
+                    _record_label_reqid(pl, rid)
+                end
+            end
+        catch
+        end
     catch err
         delete!(PENDING_REPLIES, rid)
         rethrow(err)
@@ -486,9 +624,13 @@ function send_and_wait_for_id(key::String, payload; timeout::Real=COMM_REPLY_TIM
         found = _scan_comm_queue_for_reqid(key, rid)
         if found !== nothing
             try
-                put!(PENDING_REPLIES[rid], found)
+                @async try
+                    put!(PENDING_REPLIES[rid], found)
+                catch err_put_async
+                    @warn "comm_direct: async put of found reply to pending failed" err=err_put_async req_id=rid
+                end
             catch err_put
-                @warn "comm_direct: failed to deliver found reply to pending" err=err_put req_id=rid
+                @warn "comm_direct: failed to schedule async put for found reply" err=err_put req_id=rid
             end
         end
     catch err_scan
@@ -498,6 +640,21 @@ function send_and_wait_for_id(key::String, payload; timeout::Real=COMM_REPLY_TIM
     # wait for matching reply in a background task so comm callbacks can run
     t = @async begin
         return _wait_on_pending(rid; timeout=timeout)
+    end
+    # Defensive timeout: if the background task does not complete due to
+    # a stalled ingest/callback loop, forcefully inject a timeout exception
+    # into the task so callers don't block forever.
+    t0 = time()
+    poll_interval = 0.01
+    while !istaskdone(t) && (time() - t0) < (timeout + 0.1)
+        sleep(poll_interval)
+    end
+    if !istaskdone(t)
+        try
+            Base.throwto(t, ErrorException("comm_direct: timeout waiting for req_id $rid"))
+        catch err_throw
+            @warn "comm_direct: throwto failed" err=err_throw req_id=rid
+        end
     end
     wait(t)
     return fetch(t)
@@ -723,7 +880,53 @@ function _scan_all_comm_queues_for_reqid(rid::String)
             @warn "comm_direct: error scanning queue for key" key=k err=err
         end
     end
+    # Also scan observer queues (object_update deliveries and other OOB forwards)
+    for k in keys(OBSERVER_QUEUES)
+        try
+            found = _scan_observer_queue_for_reqid(k, rid)
+            if found !== nothing
+                return found
+            end
+        catch err
+            @warn "comm_direct: error scanning observer queue for key" key=k err=err
+        end
+    end
     return nothing
+end
+
+
+function _scan_observer_queue_for_reqid(key::String, rid::String)
+    if !haskey(OBSERVER_QUEUES, key)
+        return nothing
+    end
+    ch = OBSERVER_QUEUES[key]
+    buf = String[]
+    found = nothing
+    while isready(ch)
+        s = take!(ch)
+        parsed = nothing
+        try
+            parsed = JSON.parse(s)
+        catch
+            parsed = nothing
+        end
+        handled = false
+        if isa(parsed, AbstractDict)
+            rid_parsed = _extract_reqid(parsed)
+            if rid_parsed !== nothing && string(rid_parsed) == rid
+                found = parsed
+                handled = true
+            end
+        end
+        if !handled
+            push!(buf, s)
+        end
+    end
+    # re-queue buffered items
+    for s in buf
+        put!(ch, s)
+    end
+    return found
 end
 
 
@@ -810,8 +1013,19 @@ function send_and_wait_for_next(key::String, payload; timeout::Real=COMM_REPLY_T
     t = @async begin
         return _dequeue_comm_message(key; timeout=timeout)
     end
-    # wait for task to complete and return its value; `fetch` will rethrow
-    # any exception raised inside the task.
+    # Defensive cancellation similar to send_and_wait_for_id
+    t0 = time()
+    poll_interval = 0.01
+    while !istaskdone(t) && (time() - t0) < (timeout + 0.1)
+        sleep(poll_interval)
+    end
+    if !istaskdone(t)
+        try
+            Base.throwto(t, ErrorException("comm_direct: timeout waiting for next on comm $key"))
+        catch err_throw2
+            @warn "comm_direct: throwto failed for send_and_wait_for_next" err=err_throw2 key=key
+        end
+    end
     wait(t)
     return fetch(t)
 end
@@ -883,13 +1097,40 @@ function IJulia.CommManager.register_comm(comm::IJulia.CommManager.Comm{Symbol("
                         if rid !== nothing && haskey(PENDING_REPLIES, rid)
                             ch = PENDING_REPLIES[rid]
                             try
-                                put!(ch, parsed)
+                                @async try
+                                    put!(ch, parsed)
+                                catch err_inner_async
+                                    @warn "comm_direct: async put to pending channel failed" err=err_inner_async rid=rid
+                                end
                             catch err_inner
-                                @warn "comm_direct: failed to put reply to pending channel" err=err_inner rid=rid
+                                @warn "comm_direct: failed to schedule async put to pending channel" err=err_inner rid=rid
                             end
                             # still call receive handler for side-effects
                             COMM_RECEIVE_HANDLER[](conn, parsed)
                             return
+                        end
+                        # No req_id matched — try correlate by label if present
+                        try
+                            lbl = _extract_label_from_parsed(parsed)
+                            if lbl !== nothing
+                                rid_look = _find_reqid_by_label(lbl)
+                                if rid_look !== nothing && haskey(PENDING_REPLIES, rid_look)
+                                    ch = PENDING_REPLIES[rid_look]
+                                    try
+                                        @async try
+                                            put!(ch, parsed)
+                                        catch err_inner2_async
+                                            @warn "comm_direct: async put to label-correlated pending failed" err=err_inner2_async label=lbl req_id=rid_look
+                                        end
+                                    catch err_inner2
+                                        @warn "comm_direct: failed to schedule async put for label-correlated reply" err=err_inner2 label=lbl req_id=rid_look
+                                    end
+                                    COMM_RECEIVE_HANDLER[](conn, parsed)
+                                    return
+                                end
+                            end
+                        catch err_label
+                            @warn "comm_direct: label correlation failed" err=err_label
                         end
                     end
                 catch err_inner
