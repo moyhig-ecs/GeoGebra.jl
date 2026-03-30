@@ -169,11 +169,7 @@ macro ggblab_command(expr)
                 lbl = expr.args[1]
                 lblstr = isa(lbl, QuoteNode) && isa(lbl.value, String) ? lbl.value : (isa(lbl, Symbol) ? string(lbl) : nothing)
                 if lblstr !== nothing
-                    return esc(:(begin
-                        ch = GeoGebra.construction_protocol()
-                        lbls = [g for g in ch if g.label == $(QuoteNode(lblstr))]
-                        isempty(lbls) ? lbls : lbls[end]
-                    end))
+                    return esc(:(GeoGebra.get_construction_object($(QuoteNode(lblstr)))))
                 end
             elseif expr.head == :ref
                 args_ref = expr.args
@@ -183,11 +179,7 @@ macro ggblab_command(expr)
                     idx_node = args_ref[1]
                     lbl = isa(idx_node, QuoteNode) && isa(idx_node.value, String) ? idx_node.value : (isa(idx_node, Symbol) ? string(idx_node) : nothing)
                     if lbl !== nothing
-                        return esc(:(begin
-                            ch = GeoGebra.construction_protocol()
-                                lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
-                                isempty(lbls) ? lbls : lbls[end]
-                        end))
+                        return esc(:(GeoGebra.get_construction_object($(QuoteNode(lbl)))))
                     else
                         # non-label single-ref form: fall through to command fallback
                     end
@@ -196,11 +188,7 @@ macro ggblab_command(expr)
                     idx_node = args_ref[2]
                     lbl = isa(idx_node, QuoteNode) && isa(idx_node.value, String) ? idx_node.value : (isa(idx_node, Symbol) ? string(idx_node) : nothing)
                     if lbl !== nothing
-                        return esc(:(begin
-                            ch = GeoGebra.construction_protocol()
-                            lbls = [g for g in ch if g.label == $(QuoteNode(lbl))]
-                            isempty(lbls) ? lbls : lbls[end]
-                        end))
+                        return esc(:(GeoGebra.get_construction_object($(QuoteNode(lbl)))))
                     else
                         # non-label two-arg ref: fall through to command fallback
                     end
