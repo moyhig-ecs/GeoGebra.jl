@@ -36,7 +36,10 @@ export start_ingest_server, stop_ingest_server
 # Single-channel serialized handler: ensures receive handler runs synchronously
 # (processed sequentially by a single worker task) rather than concurrently
 # from multiple connection tasks.
-const INGEST_HANDLER_CHANNEL = Channel{Tuple{Any,Any}}(1024)
+# Allow configuration of the capacity; larger capacity reduces chance of
+# blocking when many short-lived connections push messages rapidly.
+const INGEST_HANDLER_CHANNEL_CAPACITY = 8192
+const INGEST_HANDLER_CHANNEL = Channel{Tuple{Any,Any}}(INGEST_HANDLER_CHANNEL_CAPACITY)
 const INGEST_HANDLER_TASK = Ref{Union{Task,Nothing}}(nothing)
 
 function _reserve_socket_path(prefix::AbstractString="/tmp/ggb_")
@@ -210,7 +213,11 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing, websocket::B
                                 _enqueue_comm_message(k, s)
                                 conn = get_registered_connection(k)
                                 if conn !== nothing
-                                    put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
+                                    @async try
+                                        put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
+                                    catch err_put
+                                        @warn "comm_ingest: INGEST_HANDLER_CHANNEL put failed" err=err_put
+                                    end
                                 end
                             catch err_msg
                                 @warn "comm_ingest: websocket message handler error" err=err_msg
@@ -293,14 +300,11 @@ function start_ingest_server(; path::Union{Nothing,String}=nothing, websocket::B
                                 println("[comm_ingest] enqueue -> key=", k)
                                 _enqueue_comm_message(k, s)
                                 conn = get_registered_connection(k)
-                                if conn === nothing
-                                    println("[comm_ingest] no registered connection for key=", k)
-                                else
-                                    try
-                                        println("[comm_ingest] enqueue handler -> key=", k)
+                                if conn !== nothing
+                                    @async try
                                         put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
-                                    catch err_inner
-                                        @warn "comm_ingest: failed to enqueue serialized handler" err=err_inner
+                                    catch err_put
+                                        @warn "comm_ingest: INGEST_HANDLER_CHANNEL put failed" err=err_put
                                     end
                                 end
                             end

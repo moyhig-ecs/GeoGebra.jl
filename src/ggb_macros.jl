@@ -505,24 +505,24 @@ macro ggblab(args...)
                         # Prefer structural checks when possible (Expr/Symbol),
                         # falling back to string-matching for QuoteNode/text forms.
                         if isa(idx_node, Expr)
-                            # vector literal form like `[:]' or `[:]' -> Expr(:vect, ...)
+                            # vector literal form like `[:]` -> Expr(:vect, ...)
                             if idx_node.head == :vect && length(idx_node.args) == 1
                                 e = idx_node.args[1]
                                 if isa(e, Symbol) && string(e) == ":"
-                                    return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
+                                    return esc(:(let ch = GeoGebra.construction_protocol(); labels = [g.label for g in ch]; args = [[lbl] for lbl in labels]; cmds = GeoGebra.send_function("getCommandString", args); cmds_arr = try isa(cmds, AbstractVector) ? cmds : collect(cmds) catch; cmds end; [(i, ch[i].label, cmds_arr[i]) for i in 1:length(ch)] end))
                                 elseif isa(e, Symbol) && string(e) == "end"
-                                    return esc(:(let ch = GeoGebra.construction_protocol(); g = ch[end]; (length(ch), g.label, GeoGebra.send_function("getCommandString", g.label)) end))
+                                    return esc(:(let ch = GeoGebra.construction_protocol(); g = ch[end]; (length(ch), g.label, GeoGebra.send_function("getCommandString", [ [g.label] ])) end))
                                 end
                             end
                             # direct colon expression (rare) -> treat as full slice
-                            if idx_node.head == :colon
-                                return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
+                                if idx_node.head == :colon
+                                return esc(:(let ch = GeoGebra.construction_protocol(); labels = [g.label for g in ch]; args = [[lbl] for lbl in labels]; cmds = GeoGebra.send_function("getCommandString", args); cmds_arr = try isa(cmds, AbstractVector) ? cmds : collect(cmds) catch; cmds end; [(i, ch[i].label, cmds_arr[i]) for i in 1:length(ch)] end))
                             end
                         end
                         s = isa(idx_node, QuoteNode) && isa(idx_node.value, String) ? idx_node.value : string(idx_node)
                         # Full-slice forms -> return all tuples
                         if strip(s) == ":" || match(r"^\s*\[\s*:\s*\]\s*$", s) !== nothing
-                            return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
+                                    return esc(:(let ch = GeoGebra.construction_protocol(); labels = [g.label for g in ch]; args = [[lbl] for lbl in labels]; cmds = GeoGebra.send_function("getCommandString", args); cmds_arr = try isa(cmds, AbstractVector) ? cmds : collect(cmds) catch; cmds end; [(i, ch[i].label, cmds_arr[i]) for i in 1:length(ch)] end))
                         end
                         # [end]
                         if match(r"^\s*\[?\s*end\s*\]?\s*$", s) !== nothing
@@ -561,8 +561,8 @@ macro ggblab(args...)
             end
         else
             fstr = _tok_to_str(first)
-            if is_cons_str(fstr)
-                return esc(:([(i, g.label, GeoGebra.send_function("getCommandString", g.label)) for (i, g) in enumerate(GeoGebra.construction_protocol())]))
+                if is_cons_str(fstr)
+                return esc(:(let ch = GeoGebra.construction_protocol(); labels = [g.label for g in ch]; args = [[lbl] for lbl in labels]; cmds = GeoGebra.send_function("getCommandString", args); cmds_arr = try isa(cmds, AbstractVector) ? cmds : collect(cmds) catch; cmds end; [(i, ch[i].label, cmds_arr[i]) for i in 1:length(ch)] end))
             end
         end
     end

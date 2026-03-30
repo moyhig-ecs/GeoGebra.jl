@@ -100,13 +100,13 @@ function inject_applet(; insertMode::String="split-right", appName::String="suit
             pp, tt = _unpack_server_result(res)
             ingest_port = pp
             ingest_task_ws = tt
-            @debug "inject_applet: started WebSocket ingest server on port $ingest_port" host=host
+            @debug "inject_applet: started WebSocket ingest server on port $ingest_port"
         else
             res = start_ingest_server(websocket=false)
             pp, tt = _unpack_server_result(res)
             ingest_path = pp
             ingest_task = tt
-            @debug "inject_applet: started socket ingest server on path $ingest_path" host=host
+            @debug "inject_applet: started socket ingest server on path $ingest_path"
         end
     catch err
         @warn "inject_applet: failed to start ingest server, continuing without ingest socket" err=err

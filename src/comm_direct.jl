@@ -84,6 +84,8 @@ const OBJECT_OBSERVABLES = Dict{String, Observable{Any}}()
 const SEEN_REPLIES = Dict{String, Set{String}}()
 # Default timeout (seconds) to wait for a reply from the frontend via comm
 const COMM_REPLY_TIMEOUT = 10.0
+# Capacity for per-comm inbound queues (tune to avoid drops/backpressure)
+const COMM_QUEUE_CAPACITY = 8192
 # (No stored/pending reply state — inbound messages are delivered
 # asynchronously via `COMM_QUEUES` and `COMM_RECEIVE_HANDLER`.)
 function _enqueue_comm_message(key::String, data::String)
@@ -92,7 +94,7 @@ function _enqueue_comm_message(key::String, data::String)
     try
         # Ensure queue exists
         if !haskey(COMM_QUEUES, key)
-            COMM_QUEUES[key] = Channel{String}(1024)
+            COMM_QUEUES[key] = Channel{String}(COMM_QUEUE_CAPACITY)
         end
         ch = COMM_QUEUES[key]
 
@@ -290,7 +292,7 @@ end
 
 function _dequeue_comm_message(key::String; timeout::Real=COMM_REPLY_TIMEOUT)
     if !haskey(COMM_QUEUES, key)
-        COMM_QUEUES[key] = Channel{String}(1024)
+        COMM_QUEUES[key] = Channel{String}(COMM_QUEUE_CAPACITY)
     end
     ch = COMM_QUEUES[key]
     t0 = time()

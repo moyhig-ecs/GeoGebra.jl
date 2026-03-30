@@ -257,19 +257,22 @@ strings and sent inside the `payload` object:
 `{"type":"function","payload":{"name":...,"args":[...]}}`.
 """
 function send_function(name, args...; host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+    # Call the bridge synchronously — keep implementation simple and
+    # predictable. Convert returned Julia vectors to Python lists for
+    # consumers when possible, but otherwise return the raw result.
     res = CommBridge.send_function(name, args...; host=host, port=port)
-    # If the result is a Julia vector and PythonCall is available, return
-    # a Python list for better interop with juliacall/Python consumers.
+    out = res
     try
         if isa(res, AbstractVector)
             builtins = PythonCall.pyimport("builtins")
             pylist_fn = getproperty(builtins, :list)
-            return pylist_fn(res)
+            out = pylist_fn(res)
         end
     catch err
         @warn "send_function: failed to convert Vector to Python list" err=err
+        out = res
     end
-    return res
+    return out
 end
 
 """Send a `listen` message to the bridge.
@@ -392,6 +395,7 @@ include("ggb_construction.jl")
 export construction_protocol, new_construction!
 # export evalXML_from_element, process_labels_response
 export GGBObject, set_object!, set!, fetch_object, refresh, refresh!
+export get_construction_object, get_construction_objects
 include("ggb_sympy.jl")
 # Exports for helper utilities
 export sympy_to_ggb, expr_to_cmd_string
