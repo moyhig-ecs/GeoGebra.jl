@@ -194,24 +194,16 @@ function fetch_object(label::AbstractString)
         xml_to_decode = startswith(s, "<construction") ? s : "<construction>" * s * "</construction>"
         xml_to_decode = _normalize_exponent(xml_to_decode)
 
-        # Decode using Python-side schema; catch stack overflows and other errors
+        # Decode using Python-side schema; catch and handle any decode errors
         try
             ggb_schema = PythonCall.pyimport("ggblab.schema").ggb_schema()
             schema = ggb_schema.schema
             pydict = schema.decode(xml_to_decode)
             return GGBObject(lbl, pydict)
         catch err_decode
-            msg = string(err_decode)
-            if err_decode isa StackOverflowError || occursin("StackOverflowError", msg)
-                @warn "fetch_object: StackOverflowError during decode" label=lbl err=msg
-                truncated = length(xml_to_decode) > 4096 ? first(xml_to_decode, 4096) * "..." : xml_to_decode
-                pdata = Dict("__decode_failed__" => true, "raw_xml_truncated" => string(truncated), "error_message" => msg)
-                return GGBObject(lbl, pdata)
-            else
-                @warn "fetch_object: decode error" label=lbl err=err_decode
-                pdata = Dict("__decode_failed__" => true, "error_message" => string(err_decode))
-                return GGBObject(lbl, pdata)
-            end
+            @warn "fetch_object: decode error" label=lbl err=string(err_decode)
+            pdata = Dict("__decode_failed__" => true, "error_message" => string(err_decode))
+            return GGBObject(lbl, pdata)
         end
     catch e
         @warn "fetch_object: unexpected error during decode prep" label=lbl err=e
