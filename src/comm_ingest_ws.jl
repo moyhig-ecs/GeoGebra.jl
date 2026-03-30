@@ -15,6 +15,14 @@ using HTTP.WebSockets
 using JSON
 using Logging
 
+# Helper to rethrow InterruptException so Ctrl-C / task interrupts
+# are not swallowed by broad `catch err` handlers.
+function _rethrow_if_interrupt(err)
+    if err isa InterruptException
+        rethrow(err)
+    end
+end
+
 # Keep a reference to the background Task so it isn't garbage-collected.
 const INGEST_WS_TASK = Ref{Union{Task,Nothing}}(nothing)
 
@@ -31,6 +39,7 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
                 a, p = Sockets.getsockname(srv)
                 return p
             catch err
+                _rethrow_if_interrupt(err)
                 @warn "start_ingest_ws_server: failed to find free port, defaulting to 8081" err=err
                 return 8081
             finally
@@ -38,7 +47,8 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
                     if srv !== nothing && isopen(srv)
                         close(srv)
                     end
-                catch
+                catch err
+                    _rethrow_if_interrupt(err)
                     @warn "start_ingest_ws_server: failed to close temporary socket" err=err
                 end
             end
@@ -98,6 +108,7 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
                                 try
                                     _enqueue_comm_message(k, s)
                                 catch err
+                                    _rethrow_if_interrupt(err)
                                     @warn "comm_ingest_ws: _enqueue_comm_message failed" err=err
                                 end
                                 conn = get_registered_connection(k)
@@ -105,10 +116,12 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
                                     @async try
                                         put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
                                     catch err_put
+                                        _rethrow_if_interrupt(err_put)
                                         @warn "comm_ingest_ws: INGEST_HANDLER_CHANNEL put failed" err=err_put
                                     end
                                 end
                             catch err
+                                _rethrow_if_interrupt(err)
                                 @warn "comm_ingest_ws: message processing failed" err=err
                             end
                         end
@@ -118,6 +131,7 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
                 end
             end
         catch err
+            _rethrow_if_interrupt(err)
             @warn "comm_ingest_ws: listener terminated" err=err
         end
     end
