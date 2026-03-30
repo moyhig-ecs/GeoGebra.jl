@@ -135,10 +135,15 @@ function _enqueue_comm_message(key::String, data::String)
                                             end
                                         catch
                                         end
-                                        @async try
+                                        try
                                             put!(PENDING_REPLIES[rid], to_put)
-                                        catch err_put_async
-                                            @warn "comm_direct: async put bulk reply to pending failed" err=err_put_async req_id=rid
+                                        catch err_put_sync
+                                            @debug "comm_direct: sync put to pending failed, scheduling async" err=err_put_sync req_id=rid
+                                            @async try
+                                                put!(PENDING_REPLIES[rid], to_put)
+                                            catch err_put_async
+                                                @warn "comm_direct: async put bulk reply to pending failed" err=err_put_async req_id=rid
+                                            end
                                         end
                                         _mark_seen_if_needed(key, rid)
                                     catch err_put
@@ -211,10 +216,15 @@ function _enqueue_comm_message(key::String, data::String)
                                     end
                                 catch
                                 end
-                                @async try
+                                try
                                     put!(PENDING_REPLIES[rid], to_put)
-                                catch err_put_async
-                                    @warn "comm_direct: async put reply to pending failed" err=err_put_async req_id=rid
+                                catch err_put_sync
+                                    @debug "comm_direct: sync put to pending failed, scheduling async" err=err_put_sync req_id=rid
+                                    @async try
+                                        put!(PENDING_REPLIES[rid], to_put)
+                                    catch err_put_async
+                                        @warn "comm_direct: async put reply to pending failed" err=err_put_async req_id=rid
+                                    end
                                 end
                                 _mark_seen_if_needed(key, rid)
                                 return nothing
@@ -520,13 +530,18 @@ function send_and_wait_for_id(key::String, payload; timeout::Real=COMM_REPLY_TIM
         found = _scan_comm_queue_for_reqid(key, rid)
         if found !== nothing
             try
-                @async try
+                try
                     put!(PENDING_REPLIES[rid], found)
-                catch err_put_async
-                    @warn "comm_direct: async deliver found reply to pending failed" err=err_put_async req_id=rid
+                catch err_put_sync
+                    @debug "comm_direct: sync put of found reply failed, scheduling async" err=err_put_sync req_id=rid
+                    @async try
+                        put!(PENDING_REPLIES[rid], found)
+                    catch err_put_async
+                        @warn "comm_direct: async deliver found reply to pending failed" err=err_put_async req_id=rid
+                    end
                 end
             catch err_put
-                @warn "comm_direct: failed to schedule deliver found reply to pending" err=err_put req_id=rid
+                @warn "comm_direct: failed to deliver found reply to pending" err=err_put req_id=rid
             end
         end
     catch err_scan
@@ -990,13 +1005,18 @@ function IJulia.CommManager.register_comm(comm::IJulia.CommManager.Comm{Symbol("
                         if rid !== nothing && haskey(PENDING_REPLIES, rid)
                             ch = PENDING_REPLIES[rid]
                             try
-                                @async try
+                                try
                                     put!(ch, parsed)
-                                catch err_put_async
-                                    @warn "comm_direct: async put to pending channel failed" err=err_put_async rid=rid
+                                catch err_put_sync
+                                    @debug "comm_direct: sync put to pending channel failed, scheduling async" err=err_put_sync rid=rid
+                                    @async try
+                                        put!(ch, parsed)
+                                    catch err_put_async
+                                        @warn "comm_direct: async put to pending channel failed" err=err_put_async rid=rid
+                                    end
                                 end
                             catch err_inner
-                                @warn "comm_direct: failed to schedule put to pending channel" err=err_inner rid=rid
+                                @warn "comm_direct: failed to deliver to pending channel" err=err_inner rid=rid
                             end
                             # still call receive handler for side-effects (run async to avoid blocking)
                             @async try
