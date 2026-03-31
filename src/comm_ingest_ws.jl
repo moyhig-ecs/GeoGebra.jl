@@ -30,11 +30,12 @@ const INGEST_WS_TASK = Ref{Union{Task,Nothing}}(nothing)
 const INGEST_WS_HOST = Ref{Union{Nothing,String}}(nothing)
 const INGEST_WS_PORT = Ref{Union{Nothing,Int}}(nothing)
 # Last activity timestamp and idle-monitor task
-const INGEST_WS_LAST_ACTIVITY = Ref{Float64}(time())
+# `INGEST_WS_LAST_ACTIVITY` is 0.0 when no message has yet been received.
+const INGEST_WS_LAST_ACTIVITY = Ref{Float64}(0.0)
 const INGEST_WS_IDLE_SECONDS = Ref{Int}(0)
 const INGEST_WS_MONITOR = Ref{Union{Task,Nothing}}(nothing)
 
-function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout::Int=0)
+function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout::Int=3)
     # assume HTTP and HTTP.WebSockets are available (using above)
 
     host = "127.0.0.1"
@@ -162,10 +163,13 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                 while true
                     sleep(max(1, min(idle_timeout ÷ 4, 5)))
                     last = INGEST_WS_LAST_ACTIVITY[]
-                    if isnothing(last) || last == 0.0
+                    # If we've never received a message, do not restart.
+                    if last == 0.0
                         continue
                     end
-                    if time() - last > idle_timeout
+                    # Restart only when the configured seconds have elapsed
+                    # since the last received message.
+                    if time() - last >= idle_timeout
                         @info "comm_ingest_ws: idle timeout reached, restarting server" idle=idle_timeout
                         try
                             stop_ingest_ws_server()
