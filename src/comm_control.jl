@@ -72,6 +72,25 @@ function inject_applet(; insertMode::String="split-right", appName::String="suit
     if k === nothing
         throw(ErrorException("inject_applet: no kernel id available. Ensure code is running inside a Jupyter kernel with IJulia."))
     end
+    # If direct transport is not enabled via environment variable, send a
+    # minimal payload telling the frontend to create the applet from the
+    # bridge instead of attempting to start an ingest server here.
+    function _env_bool(var)
+        v = get(ENV, var, nothing)
+        if v === nothing
+            return false
+        end
+        s = lowercase(strip(String(v)))
+        return s in ("1", "true", "yes", "on")
+    end
+
+    # If neither GGB_DIRECT_TRANSPORT nor GEOGEBRA_DIRECT_TRANSPORT is set
+    if !(_env_bool("GGB_DIRECT_TRANSPORT") || _env_bool("GEOGEBRA_DIRECT_TRANSPORT"))
+        payload = Dict{String,Any}("type"=>"create_from_bridge")
+        send_comm(comm, payload)
+        return payload
+    end
+
     # Reserve an ingest transport and notify frontend.
     ingest_path = nothing
     ingest_task = nothing

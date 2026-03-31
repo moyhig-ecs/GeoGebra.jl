@@ -20,7 +20,6 @@ communicate with the frontend comm and a separate Python process hosts the
 `comm_bridge` server.
 
 Quick snippet (Julia)
----------------------
 ```julia
 using IJuliaBridgeClient
 
@@ -115,8 +114,49 @@ end
 
 # Revert to TCP bridge transport by default. Direct comm transport can
 # be enabled explicitly via `enable_direct_transport!()` when desired.
+
+# Helper: interpret common truthy env var values for boolean flags
+# Helper: interpret common truthy env var values for boolean flags
+function _env_bool(var::AbstractString)
+    v = get(ENV, var, nothing)
+    if v === nothing
+        return false
+    end
+    s = lowercase(strip(String(v)))
+    return s in ("1", "true", "yes", "on")
+end
+
+# Default to TCP bridge initially. Environment-based selection is deferred
+# to runtime so users can set `ENV` before using the package without
+# being constrained by precompilation-time evaluation.
 disable_direct_transport!()
-# enable_direct_transport!()
+
+# Runtime-init helpers: allow selecting transport at first use or explicitly.
+const _transport_initialized = Ref(false)
+
+function init_transport_from_env!()
+    if _env_bool("GGB_DIRECT_TRANSPORT") || _env_bool("GEOGEBRA_DIRECT_TRANSPORT")
+        @info "GeoGebra: enabling direct transport via environment variable"
+        enable_direct_transport!()
+    else
+        disable_direct_transport!()
+    end
+    _transport_initialized[] = true
+    return nothing
+end
+
+function _init_transport_if_needed()
+    if !_transport_initialized[]
+        try
+            init_transport_from_env!()
+        catch err
+            @warn "init_transport_from_env! failed" err=err
+            # Ensure flag set to avoid repeated attempts
+            _transport_initialized[] = true
+        end
+    end
+    return nothing
+end
 
 # Install an asynchronous comm receive handler that updates the local
 # construction protocol when the frontend notifies about created objects
@@ -236,6 +276,7 @@ resp = GeoGebra.request(Dict("type"=>"function", "payload"=>Dict("name"=>"getVer
 ```
 """
 function request(payload; host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT, timeout::Real=10.0)
+    _init_transport_if_needed()
     return _unwrap_reply(CommBridge.request(payload; host=host, port=port, timeout=timeout))
 end
 
@@ -246,6 +287,7 @@ end
 unchanged as the command payload.
 """
 function send_command(cmd_text::AbstractString; host::String=DEFAULT_HOST, port::Int=DEFAULT_PORT)
+    _init_transport_if_needed()
     return CommBridge.send_command(cmd_text; host=host, port=port)
 end
 
@@ -259,6 +301,7 @@ function send_function(name, args...; host::String=DEFAULT_HOST, port::Int=DEFAU
     # Call the bridge synchronously — keep implementation simple and
     # predictable. Convert returned Julia vectors to Python lists for
     # consumers when possible, but otherwise return the raw result.
+    _init_transport_if_needed()
     res = CommBridge.send_function(name, args...; host=host, port=port)
     out = res
     try
@@ -285,18 +328,21 @@ function send_listen(label; enabled::Bool=true, host::String=DEFAULT_HOST, port:
     # normalize label to string
     lbl = isa(label, GGBObject) ? label.label : (isa(label, Symbol) ? string(label) : string(label))
     payload = Dict("type"=>"listen", "payload"=>[lbl, enabled])
+    _init_transport_if_needed()
     return CommBridge.request(payload; host=host, port=port)
 end
 
 """Helper called by the macro: evaluate an argument tuple and call `send_command`.
 When arguments include a `GGBObject`, replace it with its `label` before sending."""
 function send_command_eval(name, args_tuple)
+    _init_transport_if_needed()
     return CommBridge.send_command_eval(name, args_tuple; host=DEFAULT_HOST, port=DEFAULT_PORT)
 end
 
 """Helper called by the macro: evaluate an argument tuple and call `send_function`.
 When arguments include a `GGBObject`, replace it with its `label` before sending."""
 function send_function_eval(name, args_tuple)
+    _init_transport_if_needed()
     return CommBridge.send_function_eval(name, args_tuple; host=DEFAULT_HOST, port=DEFAULT_PORT)
 end
 

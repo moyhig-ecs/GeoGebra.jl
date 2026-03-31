@@ -24,8 +24,11 @@ const INGEST_WS_PORT = Ref{Union{Nothing,Int}}(nothing)
 # Last activity timestamp and idle-monitor task
 # `INGEST_WS_LAST_ACTIVITY` is 0.0 when no message has yet been received.
 const INGEST_WS_LAST_ACTIVITY = Ref{Float64}(0.0)
-const INGEST_WS_IDLE_SECONDS = Ref{Float64}(0.3)
+const INGEST_WS_IDLE_SECONDS = Ref{Float64}(3.0)
 const INGEST_WS_MONITOR = Ref{Union{Task,Nothing}}(nothing)
+# Periodic maintenance restart interval (seconds). 0 disables periodic restarts.
+const INGEST_WS_PERIODIC_SECONDS = Ref{Float64}(180.0)
+const INGEST_WS_PERIODIC_MONITOR = Ref{Union{Task,Nothing}}(nothing)
 
 function start_ingest_ws_server(; given_port::Union{Nothing,UInt16}=nothing)
     # assume HTTP and HTTP.WebSockets are available (using above)
@@ -124,7 +127,7 @@ function start_ingest_ws_server(; given_port::Union{Nothing,UInt16}=nothing)
                                                             sleep(min(wait, 1.0))
                                                             continue
                                                         end
-                                                        @debug "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle_timeout
+                                                        @info "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle_timeout
                                                         try
                                                             stop_ingest_ws_server()
                                                         catch err
@@ -176,37 +179,26 @@ function start_ingest_ws_server(; given_port::Union{Nothing,UInt16}=nothing)
     INGEST_WS_HOST[] = host
     INGEST_WS_PORT[] = port
 
-    # Start an idle-monitor task if requested
-    if INGEST_WS_IDLE_SECONDS[] > 0 && INGEST_WS_MONITOR[] === nothing
-        INGEST_WS_MONITOR[] = @async begin
+    # Start a periodic maintenance monitor if requested. This performs
+    # a periodic restart+GC (useful to mitigate HTTP.WebSockets stateful
+    # deadlocks) in addition to the per-receive idle restart.
+    if INGEST_WS_PERIODIC_SECONDS[] > 0 && INGEST_WS_PERIODIC_MONITOR[] === nothing
+        INGEST_WS_PERIODIC_MONITOR[] = @async begin
             try
                 while true
-                    last = INGEST_WS_LAST_ACTIVITY[]
-                    if last == 0.0
-                        sleep(0.1)
-                        continue
-                    end
-                    idle = INGEST_WS_IDLE_SECONDS[]
-                    deadline = last + float(idle)
-                    wait = deadline - time()
-                    if wait > 0
-                        sleep(min(wait, 1.0))
-                        continue
-                    end
-                    @debug "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle
+                    sleep(INGEST_WS_PERIODIC_SECONDS[])
+                    @info "comm_ingest_ws: periodic restart due; poking listener to restart" interval=INGEST_WS_PERIODIC_SECONDS[]
                     try
                         stop_ingest_ws_server()
                     catch err
-                        @warn "comm_ingest_ws: stop failed during idle restart" err=err
+                        @warn "comm_ingest_ws: periodic stop failed" err=err
                     end
-                    # reset last-activity so we don't immediately retrigger
-                    INGEST_WS_LAST_ACTIVITY[] = 0.0
-                    # supervisor loop will restart the listener; continue monitoring
+                    # continue loop
                     continue
                 end
             catch err
             finally
-                INGEST_WS_MONITOR[] = nothing
+                INGEST_WS_PERIODIC_MONITOR[] = nothing
             end
         end
     end
