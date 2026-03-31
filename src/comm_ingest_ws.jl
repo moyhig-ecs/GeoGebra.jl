@@ -172,6 +172,13 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                 # listener terminated; log and immediately restart
                 _rethrow_if_interrupt(err)
                 @warn "comm_ingest_ws: listener terminated, restarting" err=err
+                # Run a garbage collection to help free socket buffers and
+                # other resources before attempting to restart.
+                try
+                    GC.gc()
+                catch gcerr
+                    @warn "comm_ingest_ws: GC.gc() failed" err=gcerr
+                end
             end
             # brief pause to avoid tight restart loop
             sleep(0.01)
@@ -243,6 +250,14 @@ function stop_ingest_ws_server()
     catch err
         _rethrow_if_interrupt(err)
         @warn "stop_ingest_ws_server: wakeup poke failed" err=err
+    end
+
+    # Trigger GC to encourage release of resources associated with the
+    # previous listener so the supervisor can rebind cleanly.
+    try
+        GC.gc()
+    catch gcerr
+        @warn "stop_ingest_ws_server: GC.gc() failed" err=gcerr
     end
 
     return true
