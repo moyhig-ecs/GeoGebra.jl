@@ -14,7 +14,6 @@ using HTTP
 using HTTP.WebSockets
 using JSON
 using Logging
-using Threads
 
 # Helper to rethrow InterruptException so Ctrl-C / task interrupts
 # are not swallowed by broad `catch err` handlers.
@@ -82,7 +81,7 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
                 out_chan = Channel{Any}(8)
 
                 # Reading task: put raw messages onto the inbound channel
-                read_task = Threads.@spawn begin
+                read_task = Base.Threads.@spawn begin
                     try
                         for msg in ws
                             try
@@ -105,7 +104,7 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
                 end
 
                 # Processing task: consume inbound messages and forward to kernel
-                proc_task = Threads.@spawn begin
+                proc_task = Base.Threads.@spawn begin
                     for raw in in_chan
                         try
                             @debug "[comm_ingest_ws] Received message" msg=raw
@@ -154,7 +153,7 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
                 # Outbound task placeholder: user requested not to send, so we
                 # keep a separate loop ready to handle outbound messages but
                 # do not perform `send(ws, ...)` here.
-                out_task = Threads.@spawn begin
+                out_task = Base.Threads.@spawn begin
                     try
                         while isopen(ws)
                             msg = take!(out_chan) # currently not used
