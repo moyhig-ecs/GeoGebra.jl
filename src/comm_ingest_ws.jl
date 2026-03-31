@@ -113,7 +113,45 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                                     end
                                     # update last-activity timestamp for idle detection
                                     try
+                                        prev = INGEST_WS_LAST_ACTIVITY[]
                                         INGEST_WS_LAST_ACTIVITY[] = time()
+                                        # start idle-monitor only after first receive
+                                        if prev == 0.0 && INGEST_WS_IDLE_SECONDS[] > 0 && INGEST_WS_MONITOR[] === nothing
+                                            INGEST_WS_MONITOR[] = @async begin
+                                                try
+                                                    idle_timeout = INGEST_WS_IDLE_SECONDS[]
+                                                    while true
+                                                        sleep(max(1, min(idle_timeout ÷ 4, 5)))
+                                                        last = INGEST_WS_LAST_ACTIVITY[]
+                                                        if last == 0.0
+                                                            continue
+                                                        end
+                                                        if time() - last >= idle_timeout
+                                                            @info "comm_ingest_ws: idle timeout reached, restarting server" idle=idle_timeout
+                                                            try
+                                                                stop_ingest_ws_server()
+                                                            catch err
+                                                                _rethrow_if_interrupt(err)
+                                                                @warn "comm_ingest_ws: stop failed during idle restart" err=err
+                                                            end
+                                                            # give a brief pause then start a fresh server
+                                                            sleep(0.05)
+                                                            try
+                                                                start_ingest_ws_server(port=p, idle_timeout=idle_timeout)
+                                                            catch err
+                                                                _rethrow_if_interrupt(err)
+                                                                @warn "comm_ingest_ws: restart failed" err=err
+                                                            end
+                                                            break
+                                                        end
+                                                    end
+                                                catch err
+                                                    _rethrow_if_interrupt(err)
+                                                finally
+                                                    INGEST_WS_MONITOR[] = nothing
+                                                end
+                                            end
+                                        end
                                     catch
                                     end
                                     conn = get_registered_connection(k)
