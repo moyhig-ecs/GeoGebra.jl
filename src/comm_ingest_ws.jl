@@ -222,17 +222,10 @@ end
 
 
 function stop_ingest_ws_server()
-    # Try to interrupt the background task first
-    try
-        if INGEST_WS_TASK[] !== nothing
-            Base.throwto(INGEST_WS_TASK[], InterruptException())
-        end
-    catch err
-        _rethrow_if_interrupt(err)
-        @warn "stop_ingest_ws_server: throwto failed" err=err
-    end
-
-    # Poke the listener to make sure a blocking accept/read wakes up.
+    # Rather than attempting to `throwto` the background task (which can
+    # fail if the task already exited), simply poke the listener socket
+    # to wake any blocking accept/read. The supervisor loop will detect
+    # the listener closure and restart it.
     try
         h = INGEST_WS_HOST[]
         p = INGEST_WS_PORT[]
@@ -249,7 +242,6 @@ function stop_ingest_ws_server()
         @warn "stop_ingest_ws_server: wakeup poke failed" err=err
     end
 
-    # Do not clear host/port/task here — supervisor loop owns lifecycle
     return true
 end
 
