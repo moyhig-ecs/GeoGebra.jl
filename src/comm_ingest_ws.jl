@@ -69,84 +69,79 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
         p = Int(port)
     end
     @debug "start_ingest_ws_server: starting WebSocket server on port $p" host=host
+    # Supervisor task: keep restarting the listener so service is
+    # continuous. When the listener exits (e.g. due to socket close),
+    # the loop will start a fresh listener immediately.
     task = @async begin
-        try
-            @debug "[comm_ingest_ws] Starting WebSocket server" host=host port=p
-
-            # Use the simple pattern requested:
-            # HTTP.listen(host, port) do http
-            #   HTTP.WebSockets.listen(http) do ws
-            #       ...
-            #   end
-            # end
-            # Use the simple pattern the user requested and which matches many
-            # HTTP.jl examples: pass the block argument through to
-            # `HTTP.WebSockets.listen` and handle messages directly.
-            # Direct WebSocket server using host/port (simple pattern)
-            HTTP.WebSockets.listen(host, p) do ws
-                @debug "[comm_ingest_ws] Client connected"
-                try
-                    for msg in ws
-                        # Process each incoming message in its own Task so that
-                        # slow processing (enqueue/handler channel put) doesn't
-                        # block the WebSocket receive loop or prevent new clients
-                        # from being accepted.
-                        @async begin
-                            try
-                                @debug "[comm_ingest_ws] Received message" msg=msg
-                                parsed = try JSON.parse(msg) catch msg end
-                                k = nothing
-                                if isa(parsed, AbstractDict)
-                                    if haskey(parsed, "comm_key")
-                                        k = string(parsed["comm_key"])
-                                    elseif haskey(parsed, "key")
-                                        k = string(parsed["key"])
-                                    elseif haskey(parsed, "kernelId")
-                                        k = string(parsed["kernelId"])
-                                    end
-                                end
-                                if k === nothing
-                                    ks = list_registered_comm_keys()
-                                    if isempty(ks)
-                                        @warn "comm_ingest_ws: no registered comms to route message to"
-                                        return
-                                    end
-                                    k = ks[1]
-                                end
-                                s = try isa(parsed, AbstractString) ? parsed : JSON.json(parsed) catch; string(parsed) end
+        while true
+            try
+                @debug "[comm_ingest_ws] Starting WebSocket server" host=host port=p
+                HTTP.WebSockets.listen(host, p) do ws
+                    @debug "[comm_ingest_ws] Client connected"
+                    try
+                        for msg in ws
+                            # each incoming message processed async to avoid
+                            # blocking the receive loop
+                            @async begin
                                 try
-                                    _enqueue_comm_message(k, s)
+                                    @debug "[comm_ingest_ws] Received message" msg=msg
+                                    parsed = try JSON.parse(msg) catch msg end
+                                    k = nothing
+                                    if isa(parsed, AbstractDict)
+                                        if haskey(parsed, "comm_key")
+                                            k = string(parsed["comm_key"])
+                                        elseif haskey(parsed, "key")
+                                            k = string(parsed["key"])
+                                        elseif haskey(parsed, "kernelId")
+                                            k = string(parsed["kernelId"])
+                                        end
+                                    end
+                                    if k === nothing
+                                        ks = list_registered_comm_keys()
+                                        if isempty(ks)
+                                            @warn "comm_ingest_ws: no registered comms to route message to"
+                                            return
+                                        end
+                                        k = ks[1]
+                                    end
+                                    s = try isa(parsed, AbstractString) ? parsed : JSON.json(parsed) catch; string(parsed) end
+                                    try
+                                        _enqueue_comm_message(k, s)
+                                    catch err
+                                        _rethrow_if_interrupt(err)
+                                        @warn "comm_ingest_ws: _enqueue_comm_message failed" err=err
+                                    end
+                                    # update last-activity timestamp for idle detection
+                                    try
+                                        INGEST_WS_LAST_ACTIVITY[] = time()
+                                    catch
+                                    end
+                                    conn = get_registered_connection(k)
+                                    if conn !== nothing
+                                        @async try
+                                            put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
+                                        catch err_put
+                                            _rethrow_if_interrupt(err_put)
+                                            @warn "comm_ingest_ws: INGEST_HANDLER_CHANNEL put failed" err=err_put
+                                        end
+                                    end
                                 catch err
                                     _rethrow_if_interrupt(err)
-                                    @warn "comm_ingest_ws: _enqueue_comm_message failed" err=err
+                                    @warn "comm_ingest_ws: message processing failed" err=err
                                 end
-                                # update last-activity timestamp for idle detection
-                                try
-                                    INGEST_WS_LAST_ACTIVITY[] = time()
-                                catch
-                                end
-                                conn = get_registered_connection(k)
-                                if conn !== nothing
-                                    @async try
-                                        put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
-                                    catch err_put
-                                        _rethrow_if_interrupt(err_put)
-                                        @warn "comm_ingest_ws: INGEST_HANDLER_CHANNEL put failed" err=err_put
-                                    end
-                                end
-                            catch err
-                                _rethrow_if_interrupt(err)
-                                @warn "comm_ingest_ws: message processing failed" err=err
                             end
                         end
+                    finally
+                        @debug "[comm_ingest_ws] Client disconnected"
                     end
-                finally
-                    @debug "[comm_ingest_ws] Client disconnected"
                 end
+            catch err
+                # listener terminated; log and immediately restart
+                _rethrow_if_interrupt(err)
+                @warn "comm_ingest_ws: listener terminated, restarting" err=err
             end
-        catch err
-            _rethrow_if_interrupt(err)
-            @warn "comm_ingest_ws: listener terminated" err=err
+            # brief pause to avoid tight restart loop
+            sleep(0.01)
         end
     end
 
