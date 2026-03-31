@@ -127,21 +127,14 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                                                             continue
                                                         end
                                                         if time() - last >= idle_timeout
-                                                            @info "comm_ingest_ws: idle timeout reached, restarting server" idle=idle_timeout
+                                                            @info "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle_timeout
                                                             try
                                                                 stop_ingest_ws_server()
                                                             catch err
                                                                 _rethrow_if_interrupt(err)
                                                                 @warn "comm_ingest_ws: stop failed during idle restart" err=err
                                                             end
-                                                            # give a brief pause then start a fresh server
-                                                            sleep(0.05)
-                                                            try
-                                                                start_ingest_ws_server(port=p, idle_timeout=idle_timeout)
-                                                            catch err
-                                                                _rethrow_if_interrupt(err)
-                                                                @warn "comm_ingest_ws: restart failed" err=err
-                                                            end
+                                                            # do not explicitly start here; supervisor loop will restart
                                                             break
                                                         end
                                                     end
@@ -202,23 +195,17 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                     end
                     # Restart only when the configured seconds have elapsed
                     # since the last received message.
-                    if time() - last >= idle_timeout
-                        @info "comm_ingest_ws: idle timeout reached, restarting server" idle=idle_timeout
-                        try
-                            stop_ingest_ws_server()
-                        catch err
-                            _rethrow_if_interrupt(err)
-                            @warn "comm_ingest_ws: stop failed during idle restart" err=err
+                        if time() - last >= idle_timeout
+                            @info "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle_timeout
+                            try
+                                stop_ingest_ws_server()
+                            catch err
+                                _rethrow_if_interrupt(err)
+                                @warn "comm_ingest_ws: stop failed during idle restart" err=err
+                            end
+                            # do not explicitly start here; supervisor loop will restart
+                            break
                         end
-                        # give a brief pause then start a fresh server
-                        sleep(0.05)
-                        try
-                            start_ingest_ws_server(port=p, idle_timeout=idle_timeout)
-                        catch err
-                            _rethrow_if_interrupt(err)
-                            @warn "comm_ingest_ws: restart failed" err=err
-                        end
-                        break
                     end
                 end
             catch err
@@ -262,10 +249,7 @@ function stop_ingest_ws_server()
         @warn "stop_ingest_ws_server: wakeup poke failed" err=err
     end
 
-    # Clear stored references
-    INGEST_WS_HOST[] = nothing
-    INGEST_WS_PORT[] = nothing
-    INGEST_WS_TASK[] = nothing
+    # Do not clear host/port/task here — supervisor loop owns lifecycle
     return true
 end
 
