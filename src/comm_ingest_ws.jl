@@ -134,8 +134,10 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                                                                 _rethrow_if_interrupt(err)
                                                                 @warn "comm_ingest_ws: stop failed during idle restart" err=err
                                                             end
-                                                            # do not explicitly start here; supervisor loop will restart
-                                                            break
+                                                            # reset last-activity so we don't repeatedly restart
+                                                            INGEST_WS_LAST_ACTIVITY[] = 0.0
+                                                            # supervisor loop will restart the listener; continue monitoring
+                                                            continue
                                                         end
                                                     end
                                                 catch err
@@ -203,8 +205,10 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                             _rethrow_if_interrupt(err)
                             @warn "comm_ingest_ws: stop failed during idle restart" err=err
                         end
-                        # supervisor loop will restart the listener
-                        break
+                        # reset last-activity so we don't immediately retrigger
+                        INGEST_WS_LAST_ACTIVITY[] = 0.0
+                        # supervisor loop will restart the listener; continue monitoring
+                        continue
                     end
                 end
             catch err
