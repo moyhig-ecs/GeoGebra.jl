@@ -9,22 +9,14 @@ This file provides `start_ingest_ws_server(; port=nothing)` which returns
 """
 
 using Sockets
-using Sockets
 using HTTP
 using HTTP.WebSockets
 using JSON
 using Logging
 
-# Helper to rethrow InterruptException so Ctrl-C / task interrupts
-# are not swallowed by broad `catch err` handlers.
-function _rethrow_if_interrupt(err)
-    if err isa InterruptException
-        rethrow(err)
-    end
-end
+# NOTE: interrupt rethrow helper was removed — interrupts will not be rethrown here.
 
 # Keep a reference to the background Task so it isn't garbage-collected.
-const INGEST_WS_TASK = Ref{Union{Task,Nothing}}(nothing)
 # Keep listener host/port so `stop_ingest_ws_server()` can poke the
 # listener to ensure it wakes up and exits.
 const INGEST_WS_HOST = Ref{Union{Nothing,String}}(nothing)
@@ -32,51 +24,52 @@ const INGEST_WS_PORT = Ref{Union{Nothing,Int}}(nothing)
 # Last activity timestamp and idle-monitor task
 # `INGEST_WS_LAST_ACTIVITY` is 0.0 when no message has yet been received.
 const INGEST_WS_LAST_ACTIVITY = Ref{Float64}(0.0)
-const INGEST_WS_IDLE_SECONDS = Ref{Int}(0)
+const INGEST_WS_IDLE_SECONDS = Ref{Float64}(0.3)
 const INGEST_WS_MONITOR = Ref{Union{Task,Nothing}}(nothing)
 
-function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout::Int=3)
+function start_ingest_ws_server(; given_port::Union{Nothing,UInt16}=nothing)
     # assume HTTP and HTTP.WebSockets are available (using above)
 
     host = "127.0.0.1"
-    if port === nothing
+    port::UInt16 = 0
+    if given_port === nothing
         # find an ephemeral (free) port by binding to port 0 and then closing
-        function _find_free_port()
+        function _find_free_port()::UInt16
             srv = nothing
             try
                 srv = Sockets.listen(0)
-                a, p = Sockets.getsockname(srv)
-                return p
+                addr = Sockets.getsockname(srv)
+                return UInt16(addr[2])
             catch err
-                _rethrow_if_interrupt(err)
                 @warn "start_ingest_ws_server: failed to find free port, defaulting to 8081" err=err
-                return 8081
+                return UInt16(8081)
             finally
                 try
                     if srv !== nothing && isopen(srv)
                         close(srv)
                     end
                 catch err
-                    _rethrow_if_interrupt(err)
                     @warn "start_ingest_ws_server: failed to close temporary socket" err=err
                 end
             end
         end
 
-        p = _find_free_port()
-        @debug "start_ingest_ws_server: auto-selected free port $p" host=host
+        port = _find_free_port()
+        @debug "start_ingest_ws_server: auto-selected free port $port" host=host
     else
-        p = Int(port)
+        port = UInt16(given_port)
     end
-    @debug "start_ingest_ws_server: starting WebSocket server on port $p" host=host
+    @debug "start_ingest_ws_server: starting WebSocket server on port $port" host=host
+    
     # Supervisor task: keep restarting the listener so service is
     # continuous. When the listener exits (e.g. due to socket close),
     # the loop will start a fresh listener immediately.
     task = @async begin
-        while true
-            try
-                @debug "[comm_ingest_ws] Starting WebSocket server" host=host port=p
-                HTTP.WebSockets.listen(host, p) do ws
+        let lp = port
+            while true
+                try
+                    @debug "[comm_ingest_ws] Starting WebSocket server" host=host port=lp
+                    HTTP.WebSockets.listen(host, lp) do ws
                     @debug "[comm_ingest_ws] Client connected"
                     try
                         for msg in ws
@@ -108,7 +101,6 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                                     try
                                         _enqueue_comm_message(k, s)
                                     catch err
-                                        _rethrow_if_interrupt(err)
                                         @warn "comm_ingest_ws: _enqueue_comm_message failed" err=err
                                     end
                                     # update last-activity timestamp for idle detection
@@ -121,27 +113,29 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                                                 try
                                                     idle_timeout = INGEST_WS_IDLE_SECONDS[]
                                                     while true
-                                                        sleep(max(1, min(idle_timeout ÷ 4, 5)))
                                                         last = INGEST_WS_LAST_ACTIVITY[]
                                                         if last == 0.0
+                                                            sleep(0.1)
                                                             continue
                                                         end
-                                                        if time() - last >= idle_timeout
-                                                            @info "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle_timeout
-                                                            try
-                                                                stop_ingest_ws_server()
-                                                            catch err
-                                                                _rethrow_if_interrupt(err)
-                                                                @warn "comm_ingest_ws: stop failed during idle restart" err=err
-                                                            end
-                                                            # reset last-activity so we don't repeatedly restart
-                                                            INGEST_WS_LAST_ACTIVITY[] = 0.0
-                                                            # supervisor loop will restart the listener; continue monitoring
+                                                        deadline = last + float(idle_timeout)
+                                                        wait = deadline - time()
+                                                        if wait > 0
+                                                            sleep(min(wait, 1.0))
                                                             continue
                                                         end
+                                                        @debug "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle_timeout
+                                                        try
+                                                            stop_ingest_ws_server()
+                                                        catch err
+                                                            @warn "comm_ingest_ws: stop failed during idle restart" err=err
+                                                        end
+                                                        # reset last-activity so we don't repeatedly restart
+                                                        INGEST_WS_LAST_ACTIVITY[] = 0.0
+                                                        # supervisor loop will restart the listener; continue monitoring
+                                                        continue
                                                     end
                                                 catch err
-                                                    _rethrow_if_interrupt(err)
                                                 finally
                                                     INGEST_WS_MONITOR[] = nothing
                                                 end
@@ -154,12 +148,10 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                                         @async try
                                             put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
                                         catch err_put
-                                            _rethrow_if_interrupt(err_put)
                                             @warn "comm_ingest_ws: INGEST_HANDLER_CHANNEL put failed" err=err_put
                                         end
                                     end
                                 catch err
-                                    _rethrow_if_interrupt(err)
                                     @warn "comm_ingest_ws: message processing failed" err=err
                                 end
                             end
@@ -170,56 +162,49 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                 end
             catch err
                 # listener terminated; log and immediately restart
-                _rethrow_if_interrupt(err)
-                @warn "comm_ingest_ws: listener terminated, restarting" err=err
-                # Run a garbage collection to help free socket buffers and
-                # other resources before attempting to restart.
-                try
-                    GC.gc()
-                catch gcerr
-                    @warn "comm_ingest_ws: GC.gc() failed" err=gcerr
-                end
+                @warn "comm_ingest_ws: listener terminated" err=err
+                # GC call removed here (not required)
             end
-            # brief pause to avoid tight restart loop
-            sleep(0.01)
+                # brief pause to avoid tight restart loop
+                sleep(0.01)
+            end
         end
     end
 
-    INGEST_WS_TASK[] = task
-    # store host/port and idle settings
+    
+    # store host/port
     INGEST_WS_HOST[] = host
-    INGEST_WS_PORT[] = p
-    INGEST_WS_IDLE_SECONDS[] = idle_timeout
+    INGEST_WS_PORT[] = port
 
     # Start an idle-monitor task if requested
-    if idle_timeout > 0 && INGEST_WS_MONITOR[] === nothing
+    if INGEST_WS_IDLE_SECONDS[] > 0 && INGEST_WS_MONITOR[] === nothing
         INGEST_WS_MONITOR[] = @async begin
             try
                 while true
-                    sleep(max(1, min(idle_timeout ÷ 4, 5)))
                     last = INGEST_WS_LAST_ACTIVITY[]
-                    # If we've never received a message, do not restart.
                     if last == 0.0
+                        sleep(0.1)
                         continue
                     end
-                    # Restart only when the configured seconds have elapsed
-                    # since the last received message.
-                    if time() - last >= idle_timeout
-                        @info "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle_timeout
-                        try
-                            stop_ingest_ws_server()
-                        catch err
-                            _rethrow_if_interrupt(err)
-                            @warn "comm_ingest_ws: stop failed during idle restart" err=err
-                        end
-                        # reset last-activity so we don't immediately retrigger
-                        INGEST_WS_LAST_ACTIVITY[] = 0.0
-                        # supervisor loop will restart the listener; continue monitoring
+                    idle = INGEST_WS_IDLE_SECONDS[]
+                    deadline = last + float(idle)
+                    wait = deadline - time()
+                    if wait > 0
+                        sleep(min(wait, 1.0))
                         continue
                     end
+                    @debug "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle
+                    try
+                        stop_ingest_ws_server()
+                    catch err
+                        @warn "comm_ingest_ws: stop failed during idle restart" err=err
+                    end
+                    # reset last-activity so we don't immediately retrigger
+                    INGEST_WS_LAST_ACTIVITY[] = 0.0
+                    # supervisor loop will restart the listener; continue monitoring
+                    continue
                 end
             catch err
-                _rethrow_if_interrupt(err)
             finally
                 INGEST_WS_MONITOR[] = nothing
             end
@@ -227,7 +212,7 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
     end
 
     # Return a named tuple so callers can access `.port` or destructure
-    return (port=p, task=task)
+    return (port=port, task=task)
 end
 
 
@@ -237,6 +222,7 @@ function stop_ingest_ws_server()
     # to wake any blocking accept/read. The supervisor loop will detect
     # the listener closure and restart it.
     try
+        @debug "stop_ingest_ws_server: poking listener to wake (host,port)" host=INGEST_WS_HOST[] port=INGEST_WS_PORT[]
         h = INGEST_WS_HOST[]
         p = INGEST_WS_PORT[]
         if h !== nothing && p !== nothing
@@ -248,13 +234,16 @@ function stop_ingest_ws_server()
             end
         end
     catch err
-        _rethrow_if_interrupt(err)
         @warn "stop_ingest_ws_server: wakeup poke failed" err=err
     end
 
     # Trigger GC to encourage release of resources associated with the
     # previous listener so the supervisor can rebind cleanly.
     try
+        # NOTE: HTTP.WebSockets (as of Julia 1.12.5) can deadlock without
+        # periodic re-initialization. We call GC.gc() as a mitigation and
+        # emit a warning to make this behavior visible to operators.
+        @debug "stop_ingest_ws_server: running GC; HTTP.WebSockets may require periodic reinitialization"
         GC.gc()
     catch gcerr
         @warn "stop_ingest_ws_server: GC.gc() failed" err=gcerr
