@@ -25,6 +25,10 @@ end
 
 # Keep a reference to the background Task so it isn't garbage-collected.
 const INGEST_WS_TASK = Ref{Union{Task,Nothing}}(nothing)
+# Keep listener host/port so `stop_ingest_ws_server()` can poke the
+# listener to ensure it wakes up and exits.
+const INGEST_WS_HOST = Ref{Union{Nothing,String}}(nothing)
+const INGEST_WS_PORT = Ref{Union{Nothing,Int}}(nothing)
 
 function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
     # assume HTTP and HTTP.WebSockets are available (using above)
@@ -186,7 +190,51 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
     end
 
     INGEST_WS_TASK[] = task
+    INGEST_WS_HOST[] = host
+    INGEST_WS_PORT[] = p
     # Return a named tuple so callers can access `.port` or destructure
     return (port=p, task=task)
+end
+
+
+"""Stop the ingest WebSocket server started by `start_ingest_ws_server`.
+
+This attempts to interrupt the background task and then opens a
+short-lived TCP connection to the listener address to wake any blocked
+accept/read call so the task can exit and the port be released.
+"""
+function stop_ingest_ws_server()
+    # Try to interrupt the background task first
+    try
+        if INGEST_WS_TASK[] !== nothing
+            Base.throwto(INGEST_WS_TASK[], InterruptException())
+        end
+    catch err
+        _rethrow_if_interrupt(err)
+        @warn "stop_ingest_ws_server: throwto failed" err=err
+    end
+
+    # Poke the listener to make sure a blocking accept/read wakes up.
+    try
+        h = INGEST_WS_HOST[]
+        p = INGEST_WS_PORT[]
+        if h !== nothing && p !== nothing
+            try
+                sock = connect(h, p)
+                close(sock)
+            catch err_conn
+                # ignore connection errors — listener may already be closed
+            end
+        end
+    catch err
+        _rethrow_if_interrupt(err)
+        @warn "stop_ingest_ws_server: wakeup poke failed" err=err
+    end
+
+    # Clear stored references
+    INGEST_WS_HOST[] = nothing
+    INGEST_WS_PORT[] = nothing
+    INGEST_WS_TASK[] = nothing
+    return true
 end
 
