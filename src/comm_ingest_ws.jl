@@ -25,10 +25,6 @@ end
 
 # Keep a reference to the background Task so it isn't garbage-collected.
 const INGEST_WS_TASK = Ref{Union{Task,Nothing}}(nothing)
-# Keep listener host/port so `stop_ingest_ws_server()` can poke the
-# listener to ensure it wakes up and exits.
-const INGEST_WS_HOST = Ref{Union{Nothing,String}}(nothing)
-const INGEST_WS_PORT = Ref{Union{Nothing,Int}}(nothing)
 
 function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
     # assume HTTP and HTTP.WebSockets are available (using above)
@@ -80,107 +76,58 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
             # Direct WebSocket server using host/port (simple pattern)
             HTTP.WebSockets.listen(host, p) do ws
                 @debug "[comm_ingest_ws] Client connected"
-                # Per-connection channels to decouple reading from processing
-                in_chan = Channel{Any}(128)
-                out_chan = Channel{Any}(8)
-
-                # Reading task: put raw messages onto the inbound channel
-                read_task = Base.Threads.@spawn begin
-                    try
-                        for msg in ws
+                try
+                    for msg in ws
+                        # Process each incoming message in its own Task so that
+                        # slow processing (enqueue/handler channel put) doesn't
+                        # block the WebSocket receive loop or prevent new clients
+                        # from being accepted.
+                        @async begin
                             try
-                                put!(in_chan, msg)
-                            catch err_put
-                                _rethrow_if_interrupt(err_put)
-                                @warn "comm_ingest_ws: failed to put message into in_chan" err=err_put
-                            end
-                        end
-                    catch err
-                        _rethrow_if_interrupt(err)
-                        @warn "comm_ingest_ws: WebSocket read error" err=err
-                    finally
-                        try
-                            close(in_chan)
-                        catch err
-                            _rethrow_if_interrupt(err)
-                        end
-                    end
-                end
-
-                # Processing task: consume inbound messages and forward to kernel
-                proc_task = Base.Threads.@spawn begin
-                    for raw in in_chan
-                        try
-                            @debug "[comm_ingest_ws] Received message" msg=raw
-                            parsed = try JSON.parse(raw) catch raw end
-                            k = nothing
-                            if isa(parsed, AbstractDict)
-                                if haskey(parsed, "comm_key")
-                                    k = string(parsed["comm_key"])
-                                elseif haskey(parsed, "key")
-                                    k = string(parsed["key"])
-                                elseif haskey(parsed, "kernelId")
-                                    k = string(parsed["kernelId"])
+                                @debug "[comm_ingest_ws] Received message" msg=msg
+                                parsed = try JSON.parse(msg) catch msg end
+                                k = nothing
+                                if isa(parsed, AbstractDict)
+                                    if haskey(parsed, "comm_key")
+                                        k = string(parsed["comm_key"])
+                                    elseif haskey(parsed, "key")
+                                        k = string(parsed["key"])
+                                    elseif haskey(parsed, "kernelId")
+                                        k = string(parsed["kernelId"])
+                                    end
                                 end
-                            end
-                            if k === nothing
-                                ks = list_registered_comm_keys()
-                                if isempty(ks)
-                                    @warn "comm_ingest_ws: no registered comms to route message to"
-                                    continue
+                                if k === nothing
+                                    ks = list_registered_comm_keys()
+                                    if isempty(ks)
+                                        @warn "comm_ingest_ws: no registered comms to route message to"
+                                        return
+                                    end
+                                    k = ks[1]
                                 end
-                                k = ks[1]
-                            end
-                            s = try isa(parsed, AbstractString) ? parsed : JSON.json(parsed) catch; string(parsed) end
-                            try
-                                _enqueue_comm_message(k, s)
+                                s = try isa(parsed, AbstractString) ? parsed : JSON.json(parsed) catch; string(parsed) end
+                                try
+                                    _enqueue_comm_message(k, s)
+                                catch err
+                                    _rethrow_if_interrupt(err)
+                                    @warn "comm_ingest_ws: _enqueue_comm_message failed" err=err
+                                end
+                                conn = get_registered_connection(k)
+                                if conn !== nothing
+                                    @async try
+                                        put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
+                                    catch err_put
+                                        _rethrow_if_interrupt(err_put)
+                                        @warn "comm_ingest_ws: INGEST_HANDLER_CHANNEL put failed" err=err_put
+                                    end
+                                end
                             catch err
                                 _rethrow_if_interrupt(err)
-                                @warn "comm_ingest_ws: _enqueue_comm_message failed" err=err
+                                @warn "comm_ingest_ws: message processing failed" err=err
                             end
-                            conn = get_registered_connection(k)
-                            if conn !== nothing
-                                try
-                                    put!(INGEST_HANDLER_CHANNEL, (conn, parsed))
-                                catch err_put
-                                    _rethrow_if_interrupt(err_put)
-                                    @warn "comm_ingest_ws: INGEST_HANDLER_CHANNEL put failed" err=err_put
-                                end
-                            end
-                        catch err
-                            _rethrow_if_interrupt(err)
-                            @warn "comm_ingest_ws: message processing failed" err=err
                         end
                     end
-                end
-
-                # Outbound task placeholder: user requested not to send, so we
-                # keep a separate loop ready to handle outbound messages but
-                # do not perform `send(ws, ...)` here.
-                out_task = Base.Threads.@spawn begin
-                    try
-                        while isopen(ws)
-                            msg = take!(out_chan) # currently not used
-                            @debug "comm_ingest_ws: outbound message (not sent)" msg=msg
-                        end
-                    catch err
-                        # ignore and allow graceful shutdown
-                    end
-                end
-
-                # Wait for read and processing tasks to finish
-                try
-                    wait(read_task)
-                    wait(proc_task)
-                catch err
-                    _rethrow_if_interrupt(err)
                 finally
                     @debug "[comm_ingest_ws] Client disconnected"
-                    try
-                        close(out_chan)
-                    catch err
-                        _rethrow_if_interrupt(err)
-                    end
                 end
             end
         catch err
@@ -190,51 +137,7 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
     end
 
     INGEST_WS_TASK[] = task
-    INGEST_WS_HOST[] = host
-    INGEST_WS_PORT[] = p
     # Return a named tuple so callers can access `.port` or destructure
     return (port=p, task=task)
-end
-
-
-"""Stop the ingest WebSocket server started by `start_ingest_ws_server`.
-
-This attempts to interrupt the background task and then opens a
-short-lived TCP connection to the listener address to wake any blocked
-accept/read call so the task can exit and the port be released.
-"""
-function stop_ingest_ws_server()
-    # Try to interrupt the background task first
-    try
-        if INGEST_WS_TASK[] !== nothing
-            Base.throwto(INGEST_WS_TASK[], InterruptException())
-        end
-    catch err
-        _rethrow_if_interrupt(err)
-        @warn "stop_ingest_ws_server: throwto failed" err=err
-    end
-
-    # Poke the listener to make sure a blocking accept/read wakes up.
-    try
-        h = INGEST_WS_HOST[]
-        p = INGEST_WS_PORT[]
-        if h !== nothing && p !== nothing
-            try
-                sock = connect(h, p)
-                close(sock)
-            catch err_conn
-                # ignore connection errors — listener may already be closed
-            end
-        end
-    catch err
-        _rethrow_if_interrupt(err)
-        @warn "stop_ingest_ws_server: wakeup poke failed" err=err
-    end
-
-    # Clear stored references
-    INGEST_WS_HOST[] = nothing
-    INGEST_WS_PORT[] = nothing
-    INGEST_WS_TASK[] = nothing
-    return true
 end
 
