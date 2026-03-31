@@ -15,6 +15,7 @@ SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 Sockets = "6462fe0b-24de-5631-8697-dd941f90decc"
 SymPyPythonCall = "bc8888f7-b21e-4b7c-a06a-5d9c9496438c"
 UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
+WebSockets = "104b5d7c-a370-577a-8038-80a2059c5097"
 
 [compat]
 Base64 = "1.11.0"
@@ -28,4 +29,5 @@ SHA = "0.7.0"
 Sockets = "1.11.0"
 SymPyPythonCall = "0.5.1"
 UUIDs = "1.11.0"
+WebSockets = "1.6.0"
 julia = ">=1.8, <2.0"
