@@ -25,8 +25,16 @@ end
 
 # Keep a reference to the background Task so it isn't garbage-collected.
 const INGEST_WS_TASK = Ref{Union{Task,Nothing}}(nothing)
+# Keep listener host/port so `stop_ingest_ws_server()` can poke the
+# listener to ensure it wakes up and exits.
+const INGEST_WS_HOST = Ref{Union{Nothing,String}}(nothing)
+const INGEST_WS_PORT = Ref{Union{Nothing,Int}}(nothing)
+# Last activity timestamp and idle-monitor task
+const INGEST_WS_LAST_ACTIVITY = Ref{Float64}(time())
+const INGEST_WS_IDLE_SECONDS = Ref{Int}(0)
+const INGEST_WS_MONITOR = Ref{Union{Task,Nothing}}(nothing)
 
-function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
+function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout::Int=0)
     # assume HTTP and HTTP.WebSockets are available (using above)
 
     host = "127.0.0.1"
@@ -111,6 +119,11 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
                                     _rethrow_if_interrupt(err)
                                     @warn "comm_ingest_ws: _enqueue_comm_message failed" err=err
                                 end
+                                # update last-activity timestamp for idle detection
+                                try
+                                    INGEST_WS_LAST_ACTIVITY[] = time()
+                                catch
+                                end
                                 conn = get_registered_connection(k)
                                 if conn !== nothing
                                     @async try
@@ -137,7 +150,85 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing)
     end
 
     INGEST_WS_TASK[] = task
+    # store host/port and idle settings
+    INGEST_WS_HOST[] = host
+    INGEST_WS_PORT[] = p
+    INGEST_WS_IDLE_SECONDS[] = idle_timeout
+
+    # Start an idle-monitor task if requested
+    if idle_timeout > 0 && INGEST_WS_MONITOR[] === nothing
+        INGEST_WS_MONITOR[] = @async begin
+            try
+                while true
+                    sleep(max(1, min(idle_timeout ÷ 4, 5)))
+                    last = INGEST_WS_LAST_ACTIVITY[]
+                    if isnothing(last) || last == 0.0
+                        continue
+                    end
+                    if time() - last > idle_timeout
+                        @info "comm_ingest_ws: idle timeout reached, restarting server" idle=idle_timeout
+                        try
+                            stop_ingest_ws_server()
+                        catch err
+                            _rethrow_if_interrupt(err)
+                            @warn "comm_ingest_ws: stop failed during idle restart" err=err
+                        end
+                        # give a brief pause then start a fresh server
+                        sleep(0.05)
+                        try
+                            start_ingest_ws_server(port=p, idle_timeout=idle_timeout)
+                        catch err
+                            _rethrow_if_interrupt(err)
+                            @warn "comm_ingest_ws: restart failed" err=err
+                        end
+                        break
+                    end
+                end
+            catch err
+                _rethrow_if_interrupt(err)
+            finally
+                INGEST_WS_MONITOR[] = nothing
+            end
+        end
+    end
+
     # Return a named tuple so callers can access `.port` or destructure
     return (port=p, task=task)
+end
+
+
+function stop_ingest_ws_server()
+    # Try to interrupt the background task first
+    try
+        if INGEST_WS_TASK[] !== nothing
+            Base.throwto(INGEST_WS_TASK[], InterruptException())
+        end
+    catch err
+        _rethrow_if_interrupt(err)
+        @warn "stop_ingest_ws_server: throwto failed" err=err
+    end
+
+    # Poke the listener to make sure a blocking accept/read wakes up.
+    try
+        h = INGEST_WS_HOST[]
+        p = INGEST_WS_PORT[]
+        if h !== nothing && p !== nothing
+            try
+                sock = connect(h, p)
+                close(sock)
+            catch err_conn
+                # ignore connection errors — listener may already be closed
+            end
+        end
+    catch err
+        _rethrow_if_interrupt(err)
+        @warn "stop_ingest_ws_server: wakeup poke failed" err=err
+    end
+
+    # Clear stored references
+    INGEST_WS_HOST[] = nothing
+    INGEST_WS_PORT[] = nothing
+    INGEST_WS_TASK[] = nothing
+    return true
 end
 
