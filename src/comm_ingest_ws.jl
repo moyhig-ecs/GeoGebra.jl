@@ -195,17 +195,16 @@ function start_ingest_ws_server(; port::Union{Nothing,Int}=nothing, idle_timeout
                     end
                     # Restart only when the configured seconds have elapsed
                     # since the last received message.
-                        if time() - last >= idle_timeout
-                            @info "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle_timeout
-                            try
-                                stop_ingest_ws_server()
-                            catch err
-                                _rethrow_if_interrupt(err)
-                                @warn "comm_ingest_ws: stop failed during idle restart" err=err
-                            end
-                            # do not explicitly start here; supervisor loop will restart
-                            break
+                    if time() - last >= idle_timeout
+                        @info "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle_timeout
+                        try
+                            stop_ingest_ws_server()
+                        catch err
+                            _rethrow_if_interrupt(err)
+                            @warn "comm_ingest_ws: stop failed during idle restart" err=err
                         end
+                        # supervisor loop will restart the listener
+                        break
                     end
                 end
             catch err
