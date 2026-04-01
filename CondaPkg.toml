@@ -1,6 +1,6 @@
 
 [pip.deps]
-ggblab = "@ file:///Users/manabu/work/ggblab/dist/ggblab-1.7.5-py3-none-any.whl"
+ggblab = ""
 juliacall = ""
 [deps]
 scipy = ""
