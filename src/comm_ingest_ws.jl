@@ -127,7 +127,7 @@ function start_ingest_ws_server(; given_port::Union{Nothing,UInt16}=nothing)
                                                             sleep(min(wait, 1.0))
                                                             continue
                                                         end
-                                                        @info "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle_timeout
+                                                        @debug "comm_ingest_ws: idle timeout reached, poking listener to restart" idle=idle_timeout
                                                         try
                                                             stop_ingest_ws_server()
                                                         catch err
@@ -187,7 +187,7 @@ function start_ingest_ws_server(; given_port::Union{Nothing,UInt16}=nothing)
             try
                 while true
                     sleep(INGEST_WS_PERIODIC_SECONDS[])
-                    @info "comm_ingest_ws: periodic restart due; poking listener to restart" interval=INGEST_WS_PERIODIC_SECONDS[]
+                    @debug "comm_ingest_ws: periodic restart due; poking listener to restart" interval=INGEST_WS_PERIODIC_SECONDS[]
                     try
                         stop_ingest_ws_server()
                     catch err
