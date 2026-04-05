@@ -66,6 +66,12 @@ macro ggblab_command(expr)
         name = expr.args[1]
         arg_nodes = expr.args[2:end]
 
+        # Normalize command name when callers use a quoted symbol like `:l3`
+        nm = name
+        if nm isa QuoteNode && isa(nm.value, Symbol)
+            nm = nm.value
+        end
+
         mapped_args = Any[]
         for a in arg_nodes
             if a isa Symbol
@@ -94,7 +100,7 @@ macro ggblab_command(expr)
         end
         args_tuple = Expr(:tuple, esc_args...)
 
-        call_expr = Expr(:call, Expr(:call, :getfield, :(GeoGebra), QuoteNode(:send_command_eval)), QuoteNode(name), args_tuple)
+        call_expr = Expr(:call, Expr(:call, :getfield, :(GeoGebra), QuoteNode(:send_command_eval)), QuoteNode(nm), args_tuple)
 
         return esc(:(let _res = $(call_expr)
                         _proc = GeoGebra.process_labels_response(_res)
@@ -125,9 +131,67 @@ macro ggblab_command(expr)
             end
             if lbl !== nothing
                 # If RHS is a bare symbol, evaluate it in caller scope and
-                # attempt sympy conversion. For call-exprs or complex
-                # expressions, avoid evaluating (may error if symbols like
-                # `Circle` are undefined) — instead send the expression as-is.
+                # attempt sympy conversion. If RHS is a call-expr (e.g.
+                # `:l3(_)`) evaluate the arguments at runtime, build the
+                # command string with evaluated argument labels/strings,
+                # and send the assignment command to the bridge.
+                if right isa Expr && right.head == :call && length(right.args) >= 1
+                    call_name = right.args[1]
+                    # normalize quoted command name
+                    nm = call_name
+                    if nm isa QuoteNode && isa(nm.value, Symbol)
+                        nm = nm.value
+                    end
+                    name_str = string(nm)
+                    arg_nodes = right.args[2:end]
+                    mapped_args = Any[]
+                    for a in arg_nodes
+                        if a isa Symbol
+                            s = string(a)
+                            if s == "_"
+                                push!(mapped_args, :(GeoGebra.construction_protocol()[end]))
+                                continue
+                            elseif s == "__"
+                                push!(mapped_args, :(GeoGebra.construction_protocol()[end-1]))
+                                continue
+                            elseif startswith(s, "_") && length(s) > 1
+                                numstr = s[2:end]
+                                if all(isdigit, collect(numstr))
+                                    idx = parse(Int, numstr)
+                                    push!(mapped_args, Expr(:ref, :(GeoGebra.construction_protocol()), idx))
+                                    continue
+                                end
+                            end
+                        end
+                        push!(mapped_args, a)
+                    end
+                    esc_args = Expr[]
+                    for a in mapped_args
+                        push!(esc_args, esc(a))
+                    end
+                    args_tuple = Expr(:tuple, esc_args...)
+                    tmp_args = gensym("_ggb_args")
+                    body = :(let $(tmp_args) = $(args_tuple)
+                                _argvals = $(tmp_args)
+                                _argstrs = String[]
+                                for _v in _argvals
+                                    if isa(_v, GGBObject)
+                                        push!(_argstrs, _v.label)
+                                    else
+                                        push!(_argstrs, string(_v))
+                                    end
+                                end
+                                _cmd = $(QuoteNode(string(lbl * " = "))) * $(QuoteNode(name_str)) * "(" * join(_argstrs, ", ") * ")"
+                                _res = GeoGebra.process_labels_response(GeoGebra.send_command(_cmd))
+                                try
+                                    GeoGebra._push_construction_result!(_res)
+                                catch
+                                end
+                                _res
+                             end)
+                    return esc(body)
+                end
+
                 if right isa Symbol || right isa QuoteNode
                     tmp_sym = gensym("_ggb")
                     q = QuoteNode(isa(right, Symbol) ? Symbol(right) : (isa(right, QuoteNode) && isa(right.value, Symbol) ? right.value : right))
