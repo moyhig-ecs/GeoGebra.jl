@@ -126,20 +126,29 @@ function _env_bool(var::AbstractString)
     return s in ("1", "true", "yes", "on")
 end
 
-# Default to TCP bridge initially. Environment-based selection is deferred
-# to runtime so users can set `ENV` before using the package without
-# being constrained by precompilation-time evaluation.
-disable_direct_transport!()
+# Default to direct comm transport initially. Environment-based selection
+# is deferred to runtime so users can set `ENV` before using the package
+# without being constrained by precompilation-time evaluation. By default
+# prefer the kernel-side direct comm transport for lower-latency requests.
+enable_direct_transport!()
 
 # Runtime-init helpers: allow selecting transport at first use or explicitly.
 const _transport_initialized = Ref(false)
 
 function init_transport_from_env!()
-    if _env_bool("GGB_DIRECT_TRANSPORT") || _env_bool("GEOGEBRA_DIRECT_TRANSPORT")
-        @info "GeoGebra: enabling direct transport via environment variable"
-        enable_direct_transport!()
+    # If either env var is present, respect its truthiness. If absent,
+    # default to enabled direct transport.
+    if haskey(ENV, "GGB_DIRECT_TRANSPORT") || haskey(ENV, "GEOGEBRA_DIRECT_TRANSPORT")
+        if _env_bool("GGB_DIRECT_TRANSPORT") || _env_bool("GEOGEBRA_DIRECT_TRANSPORT")
+            @info "GeoGebra: enabling direct transport via environment variable"
+            enable_direct_transport!()
+        else
+            @info "GeoGebra: disabling direct transport via environment variable"
+            disable_direct_transport!()
+        end
     else
-        disable_direct_transport!()
+        @info "GeoGebra: defaulting to direct transport"
+        enable_direct_transport!()
     end
     _transport_initialized[] = true
     return nothing

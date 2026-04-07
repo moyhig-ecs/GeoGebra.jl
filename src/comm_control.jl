@@ -84,11 +84,15 @@ function inject_applet(; insertMode::String="split-right", appName::String="suit
         return s in ("1", "true", "yes", "on")
     end
 
-    # If neither GGB_DIRECT_TRANSPORT nor GEOGEBRA_DIRECT_TRANSPORT is set
-    if !(_env_bool("GGB_DIRECT_TRANSPORT") || _env_bool("GEOGEBRA_DIRECT_TRANSPORT"))
-        payload = Dict{String,Any}("type"=>"create_from_bridge")
-        send_comm(comm, payload)
-        return payload
+    # If either env var is present and explicitly false-like, fall back
+    # to creating the applet from the bridge. If the env vars are absent,
+    # assume direct transport is allowed (module defaults to direct).
+    if haskey(ENV, "GGB_DIRECT_TRANSPORT") || haskey(ENV, "GEOGEBRA_DIRECT_TRANSPORT")
+        if !(_env_bool("GGB_DIRECT_TRANSPORT") || _env_bool("GEOGEBRA_DIRECT_TRANSPORT"))
+            payload = Dict{String,Any}("type"=>"create_from_bridge")
+            send_comm(comm, payload)
+            return payload
+        end
     end
 
     # Reserve an ingest transport and notify frontend.
