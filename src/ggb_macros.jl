@@ -100,6 +100,46 @@ macro ggblab_command(expr)
         end
         args_tuple = Expr(:tuple, esc_args...)
 
+        # If the command name is an operator (:+, :-, :*, :/, :^, etc.),
+        # construct an infix command string like "a + b" and send it
+        # via `send_command`. Otherwise fall back to the existing
+        # `send_command_eval` behavior.
+        op_str = nothing
+        if nm isa Symbol
+            s_nm = string(nm)
+            if occursin(r"^[+\-*/^%<>=!&|]+$", s_nm)
+                op_str = s_nm
+            end
+        elseif nm isa QuoteNode && isa(nm.value, Symbol)
+            s_nm = string(nm.value)
+            if occursin(r"^[+\-*/^%<>=!&|]+$", s_nm)
+                op_str = s_nm
+            end
+        end
+
+        if op_str !== nothing
+            tmp_args = gensym("_ggb_args")
+            body = :(let $(tmp_args) = $(args_tuple)
+                        _argvals = $(tmp_args)
+                        _argstrs = String[]
+                        for _v in _argvals
+                            if isa(_v, GGBObject)
+                                push!(_argstrs, _v.label)
+                            else
+                                push!(_argstrs, string(_v))
+                            end
+                        end
+                        _cmd = join(_argstrs, " " * $(QuoteNode(op_str)) * " ")
+                        _res = GeoGebra.process_labels_response(GeoGebra.send_command(_cmd))
+                        try
+                            GeoGebra._push_construction_result!(_res)
+                        catch
+                        end
+                        _res
+                     end)
+            return esc(body)
+        end
+
         call_expr = Expr(:call, Expr(:call, :getfield, :(GeoGebra), QuoteNode(:send_command_eval)), QuoteNode(nm), args_tuple)
 
         return esc(:(let _res = $(call_expr)
