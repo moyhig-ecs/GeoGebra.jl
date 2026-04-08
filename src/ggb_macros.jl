@@ -183,7 +183,38 @@ macro ggblab_command(expr)
                         nm = nm.value
                     end
                     name_str = string(nm)
-                    arg_nodes = right.args[2:end]
+                    # detect operator-like command names so we can format
+                    # assignments using infix notation (e.g. `c = a + b`).
+                    op_name = nothing
+                    if isa(nm, Symbol)
+                        s_nm2 = string(nm)
+                        if occursin(r"^[+\-*/^%<>=!&|]+$", s_nm2)
+                            op_name = s_nm2
+                        end
+                    elseif isa(nm, QuoteNode) && isa(nm.value, Symbol)
+                        s_nm2 = string(nm.value)
+                        if occursin(r"^[+\-*/^%<>=!&|]+$", s_nm2)
+                            op_name = s_nm2
+                        end
+                    end
+                    # Flatten nested same-operator calls, e.g. +(+(a,b),c) -> [a,b,c]
+                    op_sym_val = (nm isa Symbol) ? nm : (nm isa QuoteNode && isa(nm.value, Symbol) ? nm.value : nothing)
+                    function _flatten_ops_local(ex)
+                        out = Any[]
+                        if ex isa Expr && ex.head == :call && op_sym_val !== nothing
+                            head = ex.args[1]
+                            head_sym = (head isa QuoteNode && isa(head.value, Symbol)) ? head.value : head
+                            if head_sym == op_sym_val
+                                for ch in ex.args[2:end]
+                                    append!(out, _flatten_ops_local(ch))
+                                end
+                                return out
+                            end
+                        end
+                        push!(out, ex)
+                        return out
+                    end
+                    arg_nodes = _flatten_ops_local(right)
                     mapped_args = Any[]
                     for a in arg_nodes
                         if a isa Symbol
@@ -221,7 +252,13 @@ macro ggblab_command(expr)
                                         push!(_argstrs, string(_v))
                                     end
                                 end
-                                _cmd = $(QuoteNode(string(lbl * " = "))) * $(QuoteNode(name_str)) * "(" * join(_argstrs, ", ") * ")"
+                                # If we detected an operator name at macro-expansion time,
+                                # format as infix joining all operands (e.g. "d = a + b + c").
+                                if $(QuoteNode(op_name)) !== nothing && length(_argstrs) >= 2
+                                    _cmd = $(QuoteNode(string(lbl * " = " ))) * join(_argstrs, " " * $(QuoteNode(op_name)) * " ")
+                                else
+                                    _cmd = $(QuoteNode(string(lbl * " = "))) * $(QuoteNode(name_str)) * "(" * join(_argstrs, ", ") * ")"
+                                end
                                 _res = GeoGebra.process_labels_response(GeoGebra.send_command(_cmd))
                                 try
                                     GeoGebra._push_construction_result!(_res)
