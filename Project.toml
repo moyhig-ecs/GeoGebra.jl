@@ -1,6 +1,6 @@
 name = "GeoGebra"
 uuid = "db4dc2ca-38af-41b7-ab88-76237475b77d"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Manabu Higashida <manabu@higashida.net>"]
 
 [deps]
